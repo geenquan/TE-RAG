@@ -1,0 +1,24 @@
+# python
+__pycache__/
+*.pyc
+*.pyo
+
+# virtual env
+venv/
+.env
+
+# IDE
+.idea/
+.vscode/
+.claude/
+
+# system
+.DS_Store
+
+# result files
+results/
+source_dataset/
+
+# large experiment outputs
+*.log
+*.tmp
