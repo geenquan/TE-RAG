@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Type, Callable
 import pandas as pd
 
 from retrievers.base_retriever import (
-    BaseRetriever, RetrieverConfig, EvaluationMetrics
+    BaseRetriever, RetrieverConfig, EvaluationMetrics, RetrievalResult
 )
 
 
@@ -341,6 +341,82 @@ def _auto_register():
 
     except ImportError as e:
         print(f"Warning: Failed to auto-register retrievers: {e}")
+
+    # 注册 TE-RAG V2 (论文版)
+    try:
+        from terag.terag_retriever_v2 import TERAGRetrieverV2
+        from terag.config import TERAGConfig
+
+        # TE-RAG V2 需要特殊处理，因为它需要配置文件
+        # 我们创建一个适配器类
+        class TERAGV2Adapter(BaseRetriever):
+            """TE-RAG V2 适配器，使其兼容旧接口"""
+
+            def __init__(self, field_csv: str, table_csv: str,
+                         config: Optional[RetrieverConfig] = None,
+                         terag_config_path: str = None):
+                if config is None:
+                    config = RetrieverConfig(
+                        name="TE-RAG-V2",
+                        description="Table-Enhanced RAG V2 (论文版)"
+                    )
+                super().__init__(field_csv, table_csv, config)
+
+                # 加载 TE-RAG 配置
+                import os
+                from pathlib import Path
+
+                if terag_config_path is None:
+                    terag_config_path = Path(field_csv).parent.parent / 'config.yaml'
+
+                if os.path.exists(terag_config_path):
+                    self.terag_config = TERAGConfig.from_yaml(terag_config_path)
+                else:
+                    # 使用默认配置
+                    self.terag_config = TERAGConfig()
+
+                self.terag_retriever = None
+
+            def fit(self, train_data: pd.DataFrame = None):
+                """训练"""
+                if train_data is not None:
+                    self.terag_retriever = TERAGRetrieverV2(self.terag_config)
+                    self.terag_retriever.fit(train_data)
+                else:
+                    # 尝试从 artifacts 加载
+                    try:
+                        self.terag_retriever = TERAGRetrieverV2.from_artifacts(self.terag_config)
+                    except Exception:
+                        pass
+
+                self._is_fitted = True
+
+            def _retrieve(self, query: str, k: int = 5) -> List[RetrievalResult]:
+                """检索"""
+                if not self.terag_retriever:
+                    return []
+
+                results = self.terag_retriever.retrieve(query, k)
+
+                # 转换格式
+                return [
+                    RetrievalResult(
+                        table=r.table,
+                        table_score=r.table_score,
+                        columns=r.columns,
+                        metadata=r.metadata
+                    )
+                    for r in results
+                ]
+
+        if 'TE-RAG-V2' not in RetrieverFactory._registry:
+            RetrieverFactory.register(
+                'TE-RAG-V2', TERAGV2Adapter,
+                RetrieverConfig(name='TE-RAG-V2', description='Table-Enhanced RAG V2 (论文版)')
+            )
+
+    except ImportError as e:
+        print(f"Warning: Failed to register TE-RAG V2: {e}")
 
 
 # 执行自动注册

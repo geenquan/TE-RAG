@@ -1,0 +1,143 @@
+# TE-RAG 论文版配置文件
+# 所有参数统一管理，支持实验复现
+
+# 实验版本号
+version: "1.0.0"
+
+# 随机种子（确保可复现）
+seed: 42
+
+# 数据配置
+data:
+  # 数据路径
+  field_csv: "source_dataset/processed_field_schema.csv"
+  table_csv: "source_dataset/processed_table_schema.csv"
+  qa_csv: "source_dataset/processed_qa_data.csv"
+
+  # 数据划分比例
+  train_ratio: 0.70
+  dev_ratio: 0.10
+  test_ratio: 0.20
+
+  # 划分文件输出路径
+  splits_dir: "splits"
+
+# 索引配置
+index:
+  # BM25 参数
+  bm25:
+    k1: 1.5
+    b: 0.75
+
+  # 多权重增强
+  field_weights:
+    table_name: 2.0
+    table_desc: 1.5
+    field_name: 1.0
+    field_desc: 0.8
+    pattern: 0.5
+
+# 图配置
+graph:
+  # SQL 角色权重（用于二分图边权重）
+  role_weights:
+    SELECT: 1.2
+    WHERE: 2.0
+    JOIN: 1.8
+    GROUP_BY: 1.5
+    ORDER_BY: 1.3
+    HAVING: 1.4
+    FROM: 1.0
+
+# 模式挖掘配置
+pattern_mining:
+  # 实体关键词
+  entity_keywords:
+    - "公司"
+    - "供电所"
+    - "单位"
+    - "用户"
+    - "客户"
+    - "部门"
+    - "区域"
+
+  # 属性关键词
+  attribute_keywords:
+    - "售电量"
+    - "电费"
+    - "欠费"
+    - "回收率"
+    - "户数"
+    - "金额"
+    - "数量"
+
+  # 模式泛化阈值
+  similarity_threshold: 0.3
+  min_pattern_count: 1
+
+# 特征提取配置
+feature:
+  # 表级特征权重
+  table_weights:
+    bm25_score: 0.35
+    graph_score: 0.35
+    pattern_score: 0.30
+
+  # 字段级特征权重
+  field_weights:
+    direct_match: 0.40
+    graph_propagation: 0.20
+    role_prior: 0.15
+    train_recommend: 0.25
+
+  # 图传播阈值
+  graph_propagation_threshold: 0.15
+  train_similarity_threshold: 0.30
+
+  # 新增：特征计算参数（移除硬编码）
+  graph_propagation_weight: 3.0      # 图传播增强权重
+  template_match_weight: 0.6         # 模板匹配权重
+  direct_match_multiplier: 1.5       # 直接匹配倍数
+  field_name_match_bonus: 0.4        # 字段名匹配加分
+  field_graph_score_cap: 5.0         # 字段图传播分数上限
+  train_recommend_multiplier: 1.5    # 训练推荐倍数
+  train_recommend_cap: 3.0           # 训练推荐分数上限
+
+# 消融实验开关
+ablation:
+  use_graph_weight: true
+  use_template_mining: true
+  use_pattern_generalization: true
+  # use_business_rules: true  # 已删除：无明确业务定义
+  use_enhanced_index: true
+  use_role_parser: true  # 使用 sqlglot 解析
+
+# 评估配置
+evaluation:
+  # 检索层指标
+  table_k: [1, 3, 5, 10]
+  column_k: [5, 10, 20]
+
+  # SQL 评估
+  normalize_sql: true
+  execute_sql: true  # 是否执行 SQL 计算 ExecAcc
+
+  # SQL 生成评估开关
+  enable_sql_eval: true  # 是否启用 SQL 生成和评估
+
+# 图优化配置
+optimization:
+  # 角色权重优化
+  optimize_role_weights: false  # 是否优化角色权重
+  n_trials: 30  # Optuna 优化次数
+
+# 输出配置
+output:
+  artifacts_dir: "artifacts"
+  results_dir: "results"
+
+  # 保存中间产物
+  save_graph: true
+  save_index: true
+  save_patterns: true
+  save_role_stats: true

@@ -1,5 +1,19 @@
+# TE-RAG 论文版依赖
 
+# 基础
 psutil
 pandas
 matplotlib
 numpy
+
+# 新增依赖
+sqlglot>=20.0.0
+duckdb>=0.9.0
+pyyaml>=6.0
+scikit-learn>=1.0.0
+
+# 中文分词
+jieba
+
+# 图计算
+networkx
