@@ -46,6 +46,20 @@ class EvaluationMetrics:
     avg_memory_mb: float = 0.0             # 平均内存占用(MB)
     total_queries: int = 0                 # 总查询数
 
+    # ========== 新增 Schema Coverage 指标 ==========
+    table_recall: float = 0.0              # 表召回率
+    column_recall: float = 0.0             # 字段召回率
+    column_precision: float = 0.0          # 字段精确率
+    column_f1: float = 0.0                 # 字段F1分数
+
+    # ========== 新增 Top-K Table Recall ==========
+    top1_table_recall: float = 0.0         # Top1 表召回率
+    top3_table_recall: float = 0.0         # Top3 表召回率
+    top5_table_recall: float = 0.0         # Top5 表召回率
+
+    # ========== SQL Parse Rate ==========
+    sql_parse_rate: float = 0.0            # SQL可解析率
+
 
 class BaseRetriever(ABC):
     """
@@ -204,6 +218,15 @@ class BaseRetriever(ABC):
         query_times = []
         memory_usages = []
 
+        # 新增指标统计
+        table_recall_sum = 0.0
+        column_recall_sum = 0.0
+        column_precision_sum = 0.0
+        column_f1_sum = 0.0
+        top1_recall_count = 0
+        top3_recall_count = 0
+        top5_recall_count = 0
+
         for _, row in test_data.iterrows():
             query = row['question']
             gt_table = row.get('table', '')
@@ -224,6 +247,20 @@ class BaseRetriever(ABC):
 
             # 评估表格准确性
             retrieved_tables = [r.table for r in results]
+
+            # ========== 计算 Top-K Table Recall ==========
+            if gt_table_simple:
+                if gt_table_simple in retrieved_tables[:1]:
+                    top1_recall_count += 1
+                if gt_table_simple in retrieved_tables[:3]:
+                    top3_recall_count += 1
+                if gt_table_simple in retrieved_tables[:5]:
+                    top5_recall_count += 1
+
+                # Table Recall
+                if gt_table_simple in retrieved_tables:
+                    table_recall_sum += 1.0
+
             if gt_table_simple in retrieved_tables:
                 table_correct += 1
 
@@ -233,13 +270,33 @@ class BaseRetriever(ABC):
                     if r.table == gt_table_simple:
                         for col, _ in r.columns:
                             field_name = col.split('.')[-1]
-                            retrieved_fields.append(field_name)
+                            if field_name not in retrieved_fields:
+                                retrieved_fields.append(field_name)
 
                 # 如果有ground truth字段，检查是否都被检索到
                 if gt_field_list:
                     # 检查是否所有必要字段都被检索到
                     if all(f in retrieved_fields for f in gt_field_list):
                         sql_correct += 1
+
+                    # ========== 计算 Column Recall / Precision / F1 ==========
+                    gt_set = set(gt_field_list)
+                    pred_set = set(retrieved_fields)
+
+                    # Recall
+                    if gt_set:
+                        c_recall = len(gt_set & pred_set) / len(gt_set)
+                        column_recall_sum += c_recall
+
+                    # Precision
+                    if pred_set:
+                        c_precision = len(gt_set & pred_set) / len(pred_set)
+                        column_precision_sum += c_precision
+
+                    # F1
+                    if c_recall + c_precision > 0:
+                        c_f1 = 2 * c_recall * c_precision / (c_recall + c_precision)
+                        column_f1_sum += c_f1
                 else:
                     # 如果没有指定字段，只要表正确就算SQL正确
                     sql_correct += 1
@@ -251,7 +308,15 @@ class BaseRetriever(ABC):
             sql_accuracy=sql_correct / total if total > 0 else 0,
             avg_query_time=np.mean(query_times) if query_times else 0,
             avg_memory_mb=np.mean(memory_usages) if memory_usages else 0,
-            total_queries=total
+            total_queries=total,
+            # 新增指标
+            table_recall=table_recall_sum / total if total > 0 else 0,
+            column_recall=column_recall_sum / total if total > 0 else 0,
+            column_precision=column_precision_sum / total if total > 0 else 0,
+            column_f1=column_f1_sum / total if total > 0 else 0,
+            top1_table_recall=top1_recall_count / total if total > 0 else 0,
+            top3_table_recall=top3_recall_count / total if total > 0 else 0,
+            top5_table_recall=top5_recall_count / total if total > 0 else 0,
         )
 
     @property

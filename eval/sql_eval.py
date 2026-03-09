@@ -35,6 +35,95 @@ except ImportError:
     SQLGLOT_AVAILABLE = False
 
 
+# ========== Schema Coverage 指标函数 ==========
+
+def table_recall(pred_tables: List[str], gold_tables: List[str]) -> float:
+    """
+    计算 Table Recall (表召回率)
+
+    Args:
+        pred_tables: 预测的表列表
+        gold_tables: 真实的表列表
+
+    Returns:
+        召回率
+    """
+    if not gold_tables:
+        return 0.0
+    pred_set = set(pred_tables)
+    gold_set = set(gold_tables)
+    return len(pred_set & gold_set) / len(gold_set)
+
+
+def column_recall(pred_cols: List[str], gold_cols: List[str]) -> float:
+    """
+    计算 Column Recall (字段召回率)
+
+    Args:
+        pred_cols: 预测的字段列表
+        gold_cols: 真实的字段列表
+
+    Returns:
+        召回率
+    """
+    if not gold_cols:
+        return 0.0
+    pred_set = set(pred_cols)
+    gold_set = set(gold_cols)
+    return len(pred_set & gold_set) / len(gold_set)
+
+
+def column_precision(pred_cols: List[str], gold_cols: List[str]) -> float:
+    """
+    计算 Column Precision (字段精确率)
+
+    Args:
+        pred_cols: 预测的字段列表
+        gold_cols: 真实的字段列表
+
+    Returns:
+        精确率
+    """
+    if not pred_cols:
+        return 0.0
+    pred_set = set(pred_cols)
+    gold_set = set(gold_cols)
+    return len(pred_set & gold_set) / len(pred_set)
+
+
+def column_f1(pred_cols: List[str], gold_cols: List[str]) -> float:
+    """
+    计算 Column F1 Score
+
+    Args:
+        pred_cols: 预测的字段列表
+        gold_cols: 真实的字段列表
+
+    Returns:
+        F1 分数
+    """
+    recall = column_recall(pred_cols, gold_cols)
+    precision = column_precision(pred_cols, gold_cols)
+    if recall + precision == 0:
+        return 0.0
+    return 2 * recall * precision / (recall + precision)
+
+
+def topk_table_recall(pred_tables: List[str], gold_table: str, k: int) -> bool:
+    """
+    计算 Top-K Table Recall
+
+    Args:
+        pred_tables: 预测的表列表（按得分排序）
+        gold_table: 真实的表
+        k: top-k
+
+    Returns:
+        gold_table 是否在 top-k 预测中
+    """
+    return gold_table in pred_tables[:k]
+
+
 @dataclass
 class RetrievalMetrics:
     """检索层指标"""
@@ -52,6 +141,28 @@ class RetrievalMetrics:
     # 综合指标
     field_coverage: float = 0.0
 
+    # ========== 新增 Schema Coverage 指标 ==========
+    # Table Recall (表召回率)
+    table_recall: float = 0.0
+
+    # Column Recall/Precision/F1 (字段召回率/精确率/F1)
+    column_recall: float = 0.0
+    column_precision: float = 0.0
+    column_f1: float = 0.0
+
+    # ========== 新增 Top-K Table Recall ==========
+    # Top-K Table Recall (gold_table 是否在 topK 预测中)
+    top1_table_recall: float = 0.0
+    top3_table_recall: float = 0.0
+    top5_table_recall: float = 0.0
+
+    # ========== 新增效率指标 ==========
+    # Query Latency (ms)
+    avg_query_latency_ms: float = 0.0
+
+    # Memory Usage (MB)
+    avg_memory_mb: float = 0.0
+
     # 统计
     total_queries: int = 0
 
@@ -65,6 +176,15 @@ class RetrievalMetrics:
             'Column@10': self.column_at_10,
             'Column@20': self.column_at_20,
             'Field_Coverage': self.field_coverage,
+            'Table_Recall': self.table_recall,
+            'Column_Recall': self.column_recall,
+            'Column_Precision': self.column_precision,
+            'Column_F1': self.column_f1,
+            'Top1_Table_Recall': self.top1_table_recall,
+            'Top3_Table_Recall': self.top3_table_recall,
+            'Top5_Table_Recall': self.top5_table_recall,
+            'Avg_Query_Latency_ms': self.avg_query_latency_ms,
+            'Avg_Memory_MB': self.avg_memory_mb,
             'Total_Queries': self.total_queries,
         }
 
@@ -325,6 +445,22 @@ class SQLEvaluator:
         column_correct = defaultdict(int)
         field_coverage_count = 0
 
+        # 新增指标统计
+        table_recall_sum = 0.0
+        column_recall_sum = 0.0
+        column_precision_sum = 0.0
+        column_f1_sum = 0.0
+        top1_recall_count = 0
+        top3_recall_count = 0
+        top5_recall_count = 0
+
+        # 效率指标
+        query_latencies = []
+        memory_usages = []
+
+        import time
+        import tracemalloc
+
         for _, row in test_data.iterrows():
             query = row['question']
             gt_table = row.get('table', '')
@@ -337,12 +473,24 @@ class SQLEvaluator:
             if pd.notna(gt_fields) and isinstance(gt_fields, str):
                 gt_field_set = set(f.strip() for f in gt_fields.split('|') if f.strip())
 
-            # 检索
+            # 检索（带性能测量）
+            tracemalloc.start()
+            start_time = time.time()
+
             try:
                 results = retriever.retrieve(query, k=max(k_values))
             except Exception as e:
                 print(f"检索失败: {query}, 错误: {e}")
+                tracemalloc.stop()
                 continue
+
+            query_latency = (time.time() - start_time) * 1000  # ms
+            current, peak = tracemalloc.get_traced_memory()
+            memory_mb = peak / 1024 / 1024
+            tracemalloc.stop()
+
+            query_latencies.append(query_latency)
+            memory_usages.append(memory_mb)
 
             # 评估表选择
             retrieved_tables = [r.table for r in results]
@@ -352,15 +500,18 @@ class SQLEvaluator:
                     table_correct[k] += 1
 
             # 评估字段选择
-            retrieved_fields = set()
+            retrieved_fields = []
             for r in results:
                 if r.table == gt_table_simple:
                     for col, _ in r.columns:
                         field_name = col.split('.')[-1]
-                        retrieved_fields.add(field_name)
+                        if field_name not in retrieved_fields:
+                            retrieved_fields.append(field_name)
+
+            retrieved_field_set = set(retrieved_fields)
 
             # 字段覆盖率
-            if gt_field_set and gt_field_set.issubset(retrieved_fields):
+            if gt_field_set and gt_field_set.issubset(retrieved_field_set):
                 field_coverage_count += 1
 
             # Column@k
@@ -382,6 +533,32 @@ class SQLEvaluator:
                     if gt_field_set.issubset(retrieved_k):
                         column_correct[k] += 1
 
+            # ========== 计算新增指标 ==========
+            # Table Recall
+            if gt_table_simple:
+                t_recall = table_recall(retrieved_tables, [gt_table_simple])
+                table_recall_sum += t_recall
+
+            # Column Recall / Precision / F1
+            if gt_field_set:
+                gt_field_list = list(gt_field_set)
+                c_recall = column_recall(retrieved_fields, gt_field_list)
+                c_precision = column_precision(retrieved_fields, gt_field_list)
+                c_f1 = column_f1(retrieved_fields, gt_field_list)
+
+                column_recall_sum += c_recall
+                column_precision_sum += c_precision
+                column_f1_sum += c_f1
+
+            # Top-K Table Recall
+            if gt_table_simple:
+                if topk_table_recall(retrieved_tables, gt_table_simple, 1):
+                    top1_recall_count += 1
+                if topk_table_recall(retrieved_tables, gt_table_simple, 3):
+                    top3_recall_count += 1
+                if topk_table_recall(retrieved_tables, gt_table_simple, 5):
+                    top5_recall_count += 1
+
         # 计算指标
         total = len(test_data)
 
@@ -400,6 +577,20 @@ class SQLEvaluator:
         metrics.column_at_20 = column_correct[20] / total if total > 0 else 0
 
         metrics.field_coverage = field_coverage_count / total if total > 0 else 0
+
+        # 新增指标
+        metrics.table_recall = table_recall_sum / total if total > 0 else 0
+        metrics.column_recall = column_recall_sum / total if total > 0 else 0
+        metrics.column_precision = column_precision_sum / total if total > 0 else 0
+        metrics.column_f1 = column_f1_sum / total if total > 0 else 0
+
+        metrics.top1_table_recall = top1_recall_count / total if total > 0 else 0
+        metrics.top3_table_recall = top3_recall_count / total if total > 0 else 0
+        metrics.top5_table_recall = top5_recall_count / total if total > 0 else 0
+
+        # 效率指标
+        metrics.avg_query_latency_ms = sum(query_latencies) / len(query_latencies) if query_latencies else 0
+        metrics.avg_memory_mb = sum(memory_usages) / len(memory_usages) if memory_usages else 0
 
         return metrics
 

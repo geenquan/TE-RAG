@@ -46,7 +46,7 @@ def run_fast_comparison(field_csv: str, table_csv: str, qa_csv: str,
     print(f"训练集: {len(train_data)} 条")
     print(f"测试集: {len(test_data)} 条")
 
-    methods = ['BM25', 'Vector', 'LLM', 'TE-RAG']
+    methods = ['BM25', 'Vector', 'LLM', 'TE-RAG-V2']
     results = []
 
     for method in methods:
@@ -69,10 +69,26 @@ def run_fast_comparison(field_csv: str, table_csv: str, qa_csv: str,
         print(f"  Avg Query Time: {metrics.avg_query_time*1000:.1f}ms")
         print(f"  Avg Memory: {metrics.avg_memory_mb:.2f}MB")
 
+        # 新增指标输出
+        print(f"  Table Recall: {metrics.table_recall:.1%}")
+        print(f"  Column Recall: {metrics.column_recall:.1%}")
+        print(f"  Column Precision: {metrics.column_precision:.1%}")
+        print(f"  Column F1: {metrics.column_f1:.1%}")
+        print(f"  Top1 Table Recall: {metrics.top1_table_recall:.1%}")
+        print(f"  Top3 Table Recall: {metrics.top3_table_recall:.1%}")
+        print(f"  Top5 Table Recall: {metrics.top5_table_recall:.1%}")
+
         results.append({
             'Method': method,
             'Table Accuracy': metrics.table_accuracy,
             'SQL Accuracy': metrics.sql_accuracy,
+            'Table Recall': metrics.table_recall,
+            'Column Recall': metrics.column_recall,
+            'Column Precision': metrics.column_precision,
+            'Column F1': metrics.column_f1,
+            'Top1 Table Recall': metrics.top1_table_recall,
+            'Top3 Table Recall': metrics.top3_table_recall,
+            'Top5 Table Recall': metrics.top5_table_recall,
             'Avg Query Time (s)': metrics.avg_query_time,
             'Avg Memory (MB)': metrics.avg_memory_mb,
             'Fit Time (s)': fit_time
@@ -121,7 +137,7 @@ def run_fast_cold_start(field_csv: str, table_csv: str, qa_csv: str,
     print(f"训练数据: {len(train_data)} 条")
     print(f"测试数据: {len(test_data)} 条")
 
-    methods = ['BM25', 'Vector', 'LLM', 'TE-RAG']
+    methods = ['BM25', 'Vector', 'LLM', 'TE-RAG-V2']
     results = []
 
     for method in methods:
@@ -134,11 +150,21 @@ def run_fast_cold_start(field_csv: str, table_csv: str, qa_csv: str,
 
         print(f"  Table Accuracy: {metrics.table_accuracy:.1%}")
         print(f"  SQL Accuracy: {metrics.sql_accuracy:.1%}")
+        print(f"  Table Recall: {metrics.table_recall:.1%}")
+        print(f"  Column Recall: {metrics.column_recall:.1%}")
+        print(f"  Top1 Table Recall: {metrics.top1_table_recall:.1%}")
+        print(f"  Top3 Table Recall: {metrics.top3_table_recall:.1%}")
+        print(f"  Top5 Table Recall: {metrics.top5_table_recall:.1%}")
 
         results.append({
             'Method': method,
             'Table Accuracy': metrics.table_accuracy,
             'SQL Accuracy': metrics.sql_accuracy,
+            'Table Recall': metrics.table_recall,
+            'Column Recall': metrics.column_recall,
+            'Top1 Table Recall': metrics.top1_table_recall,
+            'Top3 Table Recall': metrics.top3_table_recall,
+            'Top5 Table Recall': metrics.top5_table_recall,
             'Type': 'Cold Start'
         })
 
