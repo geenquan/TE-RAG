@@ -339,6 +339,28 @@ def _auto_register():
                 RetrieverConfig(name='TE-RAG', description='Table-Enhanced RAG')
             )
 
+        # 注册 Hybrid 检索器
+        try:
+            from retrievers.hybrid_retriever import HybridRetriever
+            if 'Hybrid' not in RetrieverFactory._registry:
+                RetrieverFactory.register(
+                    'Hybrid', HybridRetriever,
+                    RetrieverConfig(name='Hybrid', description='Hybrid retriever (BM25 + Vector)')
+                )
+        except ImportError as e:
+            print(f"Warning: Failed to register Hybrid retriever: {e}")
+
+        # 注册 Graph-only 检索器（使用独立实现的 Adapter，不依赖 TERAGRetrieverV2）
+        try:
+            from retrievers.graph_retriever import GraphOnlyRetrieverAdapter
+            if 'Graph' not in RetrieverFactory._registry:
+                RetrieverFactory.register(
+                    'Graph', GraphOnlyRetrieverAdapter,
+                    RetrieverConfig(name='Graph', description='Graph-only retriever (BM25 + Graph, independent implementation)')
+                )
+        except ImportError as e:
+            print(f"Warning: Failed to register Graph retriever: {e}")
+
     except ImportError as e:
         print(f"Warning: Failed to auto-register retrievers: {e}")
 
@@ -382,6 +404,30 @@ def _auto_register():
                 if train_data is not None:
                     self.terag_retriever = TERAGRetrieverV2(self.terag_config)
                     self.terag_retriever.fit(train_data)
+
+                    # 尝试加载预学习的权重（如果存在）
+                    try:
+                        import os
+                        import json
+                        # learned_weights.json 在 artifacts 目录下
+                        artifacts_dir = self.terag_config.output.artifacts_dir
+                        weights_path = os.path.join(artifacts_dir, 'learned_weights.json')
+                        if os.path.exists(weights_path):
+                            with open(weights_path, 'r') as f:
+                                learned_weights = json.load(f)
+                            # 更新排序器权重
+                            if hasattr(self.terag_retriever, 'ranker') and self.terag_retriever.ranker:
+                                table_weights = learned_weights.get('table_weights', {})
+                                field_weights = learned_weights.get('field_weights', {})
+                                if table_weights:
+                                    self.terag_retriever.ranker.table_ranker.set_weights(table_weights)
+                                    print(f"TE-RAG V2: 加载表权重: {table_weights}")
+                                if field_weights:
+                                    self.terag_retriever.ranker.field_ranker.set_weights(field_weights)
+                                    print(f"TE-RAG V2: 加载字段权重: {field_weights}")
+                            print(f"TE-RAG V2: 已加载学习到的权重")
+                    except Exception as e:
+                        print(f"TE-RAG V2: 加载权重失败 (使用默认权重): {e}")
                 else:
                     # 尝试从 artifacts 加载
                     try:

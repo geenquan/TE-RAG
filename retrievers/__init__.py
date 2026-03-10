@@ -18,6 +18,8 @@ from retrievers.bm25_retriever import BM25Retriever
 from retrievers.vector_retriever import VectorRetriever
 from retrievers.llm_retriever import LLMRetriever
 from retrievers.terag_retriever import TERAGRetriever
+from retrievers.hybrid_retriever import HybridRetriever
+from retrievers.graph_retriever import GraphOnlyRetriever, GraphOnlyRetrieverAdapter
 from retrievers.retriever_factory import RetrieverFactory, RetrieverManager
 
 __all__ = [
@@ -29,6 +31,9 @@ __all__ = [
     'VectorRetriever',
     'LLMRetriever',
     'TERAGRetriever',
+    'HybridRetriever',
+    'GraphOnlyRetriever',
+    'GraphOnlyRetrieverAdapter',
     'RetrieverFactory',
     'RetrieverManager'
 ]

@@ -283,6 +283,10 @@ class BaseRetriever(ABC):
                     gt_set = set(gt_field_list)
                     pred_set = set(retrieved_fields)
 
+                    # 初始化变量
+                    c_recall = 0.0
+                    c_precision = 0.0
+
                     # Recall
                     if gt_set:
                         c_recall = len(gt_set & pred_set) / len(gt_set)

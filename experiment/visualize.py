@@ -26,12 +26,16 @@ class ExperimentVisualizer:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
 
-        # 颜色配置
+        # 颜色配置 - 为每个方法设置独特颜色
         self.colors = {
-            'TE-RAG': '#2E86AB',
-            'BM25': '#A23B72',
-            'Vector': '#F18F01',
-            'LLM': '#C73E1D',
+            'TE-RAG': '#B07AA1',         # 紫色
+            'TE-RAG-V2': '#B07AA1',      # 紫色 (与 TE-RAG 同色)
+            'BM25': '#4E79A7',           # 深蓝色
+            'Vector': '#F28E2B',         # 橙色
+            'Hybrid': '#E15759',         # 红色
+            'LLM': '#76B7B2',            # 青色
+            'Graph': '#59A14F',          # 绿色
+            # 消融实验颜色
             'Full TE-RAG': '#2E86AB',
             'w/o Graph Weight': '#A23B72',
             'w/o Template Mining': '#F18F01',
@@ -401,21 +405,29 @@ class ExperimentVisualizer:
             fit_time = row.get('Fit Time (s)', 0)
             report += f"| {method} | {query_time:.1f} | {memory:.2f} | {fit_time:.2f} |\n"
 
-        # 计算改进
-        terag_row = comparison_results[comparison_results['Method'] == 'TE-RAG']
+        # 计算改进 - 优先查找 TE-RAG-V2，如果没有则查找 TE-RAG
+        terag_row = comparison_results[comparison_results['Method'] == 'TE-RAG-V2']
+        if terag_row.empty:
+            terag_row = comparison_results[comparison_results['Method'] == 'TE-RAG']
+
         if not terag_row.empty:
             terag_table = terag_row['Table Accuracy'].values[0] * 100
             terag_sql = terag_row['SQL Accuracy'].values[0] * 100
+            terag_method = terag_row['Method'].values[0]
         else:
             terag_table = 0
             terag_sql = 0
+            terag_method = None
 
-        baselines = comparison_results[comparison_results['Method'] != 'TE-RAG']
+        # 排除 TE-RAG 变体作为 baseline
+        baselines = comparison_results[
+            ~comparison_results['Method'].isin(['TE-RAG', 'TE-RAG-V2'])
+        ]
 
         report += f"""
 ### 性能提升
 
-TE-RAG 相比其他基线方法的改进：
+{terag_method if terag_method else 'TE-RAG'} 相比其他基线方法的改进：
 
 | Baseline | Table Acc Improvement | SQL Acc Improvement |
 |----------|----------------------|---------------------|

@@ -2,6 +2,7 @@
 快速实验运行器
 
 运行简化版的对比实验和消融实验，快速生成结果
+支持时间戳目录和数据划分保存
 """
 
 import os
@@ -9,6 +10,7 @@ import sys
 import pandas as pd
 import numpy as np
 import time
+from datetime import datetime
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -18,8 +20,39 @@ from retrievers import (
 )
 
 
-def run_quick_comparison(field_csv: str, table_csv: str, qa_csv: str,
-                         output_dir: str = './results'):
+def get_timestamp_dir(base_dir: str) -> str:
+    """生成时间戳目录名，格式：YYYYMMDD_HHMMSS"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = os.path.join(base_dir, timestamp)
+    os.makedirs(output_dir, exist_ok=True)
+    return output_dir
+
+
+def save_data_splits(output_dir: str, comparison_train: pd.DataFrame, comparison_test: pd.DataFrame,
+                     cold_start_train: pd.DataFrame, cold_start_test: pd.DataFrame,
+                     cold_start_tables: list):
+    """保存数据划分到目录，方便复现"""
+    splits_dir = os.path.join(output_dir, 'splits')
+    os.makedirs(splits_dir, exist_ok=True)
+
+    # 保存对比实验数据划分
+    comparison_train.to_csv(os.path.join(splits_dir, 'comparison_train.csv'), index=False)
+    comparison_test.to_csv(os.path.join(splits_dir, 'comparison_test.csv'), index=False)
+
+    # 保存冷启动实验数据划分
+    cold_start_train.to_csv(os.path.join(splits_dir, 'cold_start_train.csv'), index=False)
+    cold_start_test.to_csv(os.path.join(splits_dir, 'cold_start_test.csv'), index=False)
+
+    # 保存冷启动测试表列表
+    with open(os.path.join(splits_dir, 'cold_start_tables.txt'), 'w') as f:
+        for table in cold_start_tables:
+            f.write(f"{table}\n")
+
+    print(f"数据划分已保存到: {splits_dir}")
+
+
+def run_quick_comparison(field_csv: str, table_csv: str, output_dir: str,
+                         train_data: pd.DataFrame, test_data: pd.DataFrame):
     """
     快速对比实验
     """
@@ -27,29 +60,23 @@ def run_quick_comparison(field_csv: str, table_csv: str, qa_csv: str,
     print("对比实验")
     print("=" * 60)
 
-    # 读取数据
-    qa_df = pd.read_csv(qa_csv)
-    print(f"总数据: {len(qa_df)} 条")
-
-    # 简单分割
-    np.random.seed(42)
-    indices = np.random.permutation(len(qa_df))
-    n_train = int(len(indices) * 0.7)
-    train_data = qa_df.iloc[indices[:n_train]]
-    test_data = qa_df.iloc[indices[n_train:]]
-
     print(f"训练集: {len(train_data)} 条")
     print(f"测试集: {len(test_data)} 条")
 
     # 创建所有检索器
-    methods = ['BM25', 'Vector', 'LLM', 'TE-RAG-V2']
+    methods = ['BM25', 'Vector', 'Hybrid', 'LLM', 'Graph', 'TE-RAG-V2']
     results = []
+
+    # 用于验证方法独立性的调试信息
+    print(f"\n[DEBUG] 可用检索器: {RetrieverFactory.list_available()}")
 
     for method in methods:
         print(f"\n--- 测试 {method} ---")
 
-        # 创建
+        # 创建 - 添加调试信息
+        print(f"  [DEBUG] 创建 {method} 检索器...")
         retriever = RetrieverFactory.create(method, field_csv, table_csv)
+        print(f"  [DEBUG] 检索器类型: {type(retriever).__name__}")
 
         # 训练
         start_time = time.time()
@@ -76,6 +103,9 @@ def run_quick_comparison(field_csv: str, table_csv: str, qa_csv: str,
         print(f"  Top3 Table Recall: {metrics.top3_table_recall:.1%}")
         print(f"  Top5 Table Recall: {metrics.top5_table_recall:.1%}")
 
+        # 添加调试信息，验证结果唯一性
+        print(f"  [DEBUG] 结果ID: {id(metrics)}, Table Acc: {metrics.table_accuracy:.4f}")
+
         results.append({
             'Method': method,
             'Table Accuracy': metrics.table_accuracy,
@@ -94,17 +124,22 @@ def run_quick_comparison(field_csv: str, table_csv: str, qa_csv: str,
 
     # 保存结果
     df = pd.DataFrame(results)
-    os.makedirs(output_dir, exist_ok=True)
     df.to_csv(os.path.join(output_dir, 'comparison_results.csv'), index=False)
 
     print("\n对比实验结果:")
     print(df.to_string(index=False))
 
+    # 验证结果是否唯一
+    print("\n[DEBUG] 验证结果唯一性:")
+    for i, r in enumerate(results):
+        print(f"  {r['Method']}: Table Acc = {r['Table Accuracy']:.4f}, SQL Acc = {r['SQL Accuracy']:.4f}")
+
     return df
 
 
-def run_quick_cold_start(field_csv: str, table_csv: str, qa_csv: str,
-                         output_dir: str = './results'):
+def run_quick_cold_start(field_csv: str, table_csv: str, output_dir: str,
+                         train_data: pd.DataFrame, test_data: pd.DataFrame,
+                         test_tables: list):
     """
     冷启动实验
     """
@@ -112,28 +147,21 @@ def run_quick_cold_start(field_csv: str, table_csv: str, qa_csv: str,
     print("冷启动实验")
     print("=" * 60)
 
-    qa_df = pd.read_csv(qa_csv)
-
-    # 获取所有表
-    all_tables = qa_df['table'].unique()
-    np.random.seed(42)
-    test_tables = np.random.choice(all_tables, size=max(1, int(len(all_tables) * 0.2)), replace=False)
-
-    train_data = qa_df[~qa_df['table'].isin(test_tables)]
-    test_data = qa_df[qa_df['table'].isin(test_tables)]
-
-    print(f"训练表数: {len(train_data['table'].unique())}")
-    print(f"测试表数: {len(test_tables)} (新表)")
+    print(f"总测试表数: {len(test_tables)} (新表)")
     print(f"训练数据: {len(train_data)} 条")
     print(f"测试数据: {len(test_data)} 条")
 
-    methods = ['BM25', 'Vector', 'LLM', 'TE-RAG-V2']
+    methods = ['BM25', 'Vector', 'Hybrid', 'LLM', 'Graph', 'TE-RAG-V2']
     results = []
 
     for method in methods:
         print(f"\n--- 测试 {method} ---")
 
+        # 添加调试信息
+        print(f"  [DEBUG] 创建 {method} 检索器...")
         retriever = RetrieverFactory.create(method, field_csv, table_csv)
+        print(f"  [DEBUG] 检索器类型: {type(retriever).__name__}")
+
         retriever.fit(train_data)
 
         metrics = retriever.evaluate(test_data, k=5)
@@ -145,6 +173,9 @@ def run_quick_cold_start(field_csv: str, table_csv: str, qa_csv: str,
         print(f"  Top1 Table Recall: {metrics.top1_table_recall:.1%}")
         print(f"  Top3 Table Recall: {metrics.top3_table_recall:.1%}")
         print(f"  Top5 Table Recall: {metrics.top5_table_recall:.1%}")
+
+        # 添加调试信息，验证结果唯一性
+        print(f"  [DEBUG] 结果ID: {id(metrics)}, Table Acc: {metrics.table_accuracy:.4f}")
 
         results.append({
             'Method': method,
@@ -164,11 +195,16 @@ def run_quick_cold_start(field_csv: str, table_csv: str, qa_csv: str,
     print("\n冷启动实验结果:")
     print(df.to_string(index=False))
 
+    # 验证结果是否唯一
+    print("\n[DEBUG] 验证冷启动结果唯一性:")
+    for i, r in enumerate(results):
+        print(f"  {r['Method']}: Table Acc = {r['Table Accuracy']:.4f}, SQL Acc = {r['SQL Accuracy']:.4f}")
+
     return df
 
 
-def run_quick_ablation(field_csv: str, table_csv: str, qa_csv: str,
-                       output_dir: str = './results'):
+def run_quick_ablation(field_csv: str, table_csv: str, output_dir: str,
+                       train_data: pd.DataFrame, test_data: pd.DataFrame):
     """
     简化版消融实验
     """
@@ -178,16 +214,9 @@ def run_quick_ablation(field_csv: str, table_csv: str, qa_csv: str,
 
     from experiment.ablation import AblationTE_RAG
 
-    qa_df = pd.read_csv(qa_csv)
-
-    np.random.seed(42)
-    indices = np.random.permutation(len(qa_df))
-    n_train = int(len(indices) * 0.7)
-    train_data = qa_df.iloc[indices[:n_train]]
-    test_data = qa_df.iloc[indices[n_train:]]
-
     # 保存训练数据
-    train_data.to_csv('/tmp/ablation_train.csv', index=False)
+    train_csv = os.path.join(output_dir, 'splits', 'ablation_train.csv')
+    train_data.to_csv(train_csv, index=False)
 
     # 定义消融配置
     configs = [
@@ -233,7 +262,7 @@ def run_quick_ablation(field_csv: str, table_csv: str, qa_csv: str,
     for config in configs:
         print(f"\n--- 测试 {config['name']} ---")
 
-        retriever = AblationTE_RAG(field_csv, table_csv, '/tmp/ablation_train.csv')
+        retriever = AblationTE_RAG(field_csv, table_csv, train_csv)
         retriever.use_graph_weight = config['settings']['use_graph_weight']
         retriever.use_template_mining = config['settings']['use_template_mining']
         retriever.use_pattern_generalization = config['settings']['use_pattern_generalization']
@@ -303,20 +332,59 @@ def main():
     field_csv = '/Users/apple/Documents/浙大工作/论文/分层查询数据表/code/source_dataset/processed_field_schema.csv'
     table_csv = '/Users/apple/Documents/浙大工作/论文/分层查询数据表/code/source_dataset/processed_table_schema.csv'
     qa_csv = '/Users/apple/Documents/浙大工作/论文/分层查询数据表/code/source_dataset/processed_qa_data.csv'
-    output_dir = '/Users/apple/Documents/浙大工作/论文/分层查询数据表/code/results'
+    base_results_dir = '/Users/apple/Documents/浙大工作/论文/分层查询数据表/code/results'
+
+    # 生成时间戳目录
+    output_dir = get_timestamp_dir(base_results_dir)
+    print(f"实验结果目录: {output_dir}")
 
     print("=" * 60)
     print("TE-RAG 实验运行")
     print("=" * 60)
 
+    start_time = time.time()
+
+    # 读取数据
+    qa_df = pd.read_csv(qa_csv)
+    print(f"总数据: {len(qa_df)} 条")
+
+    # ============ 数据划分（统一在 main 中进行） ============
+
+    # 1. 对比实验数据划分
+    print("\n划分对比实验数据...")
+    np.random.seed(42)
+    indices = np.random.permutation(len(qa_df))
+    n_train = int(len(indices) * 0.7)
+    comparison_train = qa_df.iloc[indices[:n_train]].reset_index(drop=True)
+    comparison_test = qa_df.iloc[indices[n_train:]].reset_index(drop=True)
+
+    # 2. 冷启动实验数据划分
+    print("划分冷启动实验数据...")
+    all_tables = qa_df['table'].unique()
+    np.random.seed(42)
+    n_test_tables = max(1, int(len(all_tables) * 0.2))
+    cold_start_test_tables = list(np.random.choice(all_tables, size=n_test_tables, replace=False))
+    cold_start_train = qa_df[~qa_df['table'].isin(cold_start_test_tables)].reset_index(drop=True)
+    cold_start_test = qa_df[qa_df['table'].isin(cold_start_test_tables)].reset_index(drop=True)
+
+    # 保存数据划分
+    save_data_splits(output_dir, comparison_train, comparison_test,
+                     cold_start_train, cold_start_test, cold_start_test_tables)
+
+    # ============ 运行实验 ============
+
     # 1. 对比实验
-    comparison_df = run_quick_comparison(field_csv, table_csv, qa_csv, output_dir)
+    comparison_df = run_quick_comparison(field_csv, table_csv, output_dir,
+                                         comparison_train, comparison_test)
 
     # 2. 冷启动实验
-    cold_start_df = run_quick_cold_start(field_csv, table_csv, qa_csv, output_dir)
+    cold_start_df = run_quick_cold_start(field_csv, table_csv, output_dir,
+                                         cold_start_train, cold_start_test,
+                                         cold_start_test_tables)
 
     # 3. 消融实验
-    ablation_df = run_quick_ablation(field_csv, table_csv, qa_csv, output_dir)
+    ablation_df = run_quick_ablation(field_csv, table_csv, output_dir,
+                                     comparison_train, comparison_test)
 
     # 生成可视化
     print("\n" + "=" * 60)
@@ -346,8 +414,10 @@ def main():
     # 生成报告
     visualizer.create_summary_report(comparison_df, ablation_df, cold_start_df)
 
+    total_time = time.time() - start_time
+
     print("\n" + "=" * 60)
-    print("实验完成!")
+    print(f"实验完成! 总耗时: {total_time/60:.1f} 分钟")
     print("=" * 60)
     print(f"\n结果保存在: {output_dir}")
     for f in os.listdir(output_dir):
