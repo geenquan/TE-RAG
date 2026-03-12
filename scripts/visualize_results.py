@@ -41,6 +41,7 @@ METHOD_COLORS = {
     'Vector': '#96D1E0',     # 浅蓝
     'Hybrid': '#E9A375',     # 橙色
     'LLM': '#FDBCA7',        # 粉橙
+    'RESDSQL': '#FEE1D4',    # 浅粉
     'Graph': '#FB9680',      # 珊瑚橙
 
     # 我们的方法 (暖色/红系 - 突出显示)

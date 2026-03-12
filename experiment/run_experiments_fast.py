@@ -69,7 +69,7 @@ def run_fast_comparison(field_csv: str, table_csv: str, output_dir: str,
     print(f"训练集: {len(train_data)} 条")
     print(f"测试集: {len(test_data)} 条")
 
-    methods = ['BM25', 'Vector', 'Hybrid', 'LLM', 'Graph', 'TE-RAG-V2']
+    methods = ['BM25', 'Vector', 'Hybrid', 'LLM', 'RESDSQL', 'RAT-SQL', 'Seq2SQL', 'IRNet', 'Graph', 'TE-RAG-V2']
     results = []
 
     for method in methods:
@@ -153,11 +153,11 @@ def run_fast_cold_start(field_csv: str, table_csv: str, output_dir: str,
     print(f"训练数据: {len(train_data)} 条")
     print(f"测试数据: {len(test_data)} 条")
 
-    methods = ['BM25', 'Vector', 'Hybrid', 'LLM', 'Graph', 'TE-RAG-V2']
+    methods = ['BM25', 'Vector', 'Hybrid', 'LLM', 'RESDSQL', 'RAT-SQL', 'Seq2SQL', 'IRNet', 'Graph', 'TE-RAG-V2']
     results = []
 
     for method in methods:
-        print(f"\n--- 测试 {method} ---")
+        print(f"\n--- 测试 {method} (冷启动) ---")
 
         # 添加调试信息
         print(f"  [DEBUG] 创建 {method} 检索器...")

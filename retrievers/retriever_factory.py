@@ -361,6 +361,50 @@ def _auto_register():
         except ImportError as e:
             print(f"Warning: Failed to register Graph retriever: {e}")
 
+        # 注册 RESDSQL 检索器
+        try:
+            from retrievers.resdsql_retriever import RESDSQLRetriever
+            if 'RESDSQL' not in RetrieverFactory._registry:
+                RetrieverFactory.register(
+                    'RESDSQL', RESDSQLRetriever,
+                    RetrieverConfig(name='RESDSQL', description='RESDSQL-style schema ranking retriever')
+                )
+        except ImportError as e:
+            print(f"Warning: Failed to register RESDSQL retriever: {e}")
+
+        # 注册 RAT-SQL 检索器
+        try:
+            from retrievers.ratsql_retriever import RATSQLRetriever
+            if 'RAT-SQL' not in RetrieverFactory._registry:
+                RetrieverFactory.register(
+                    'RAT-SQL', RATSQLRetriever,
+                    RetrieverConfig(name='RAT-SQL', description='RAT-SQL style relation-aware schema ranking retriever')
+                )
+        except ImportError as e:
+            print(f"Warning: Failed to register RAT-SQL retriever: {e}")
+
+        # 注册 Seq2SQL 检索器
+        try:
+            from retrievers.seq2sql_retriever import Seq2SQLRetriever
+            if 'Seq2SQL' not in RetrieverFactory._registry:
+                RetrieverFactory.register(
+                    'Seq2SQL', Seq2SQLRetriever,
+                    RetrieverConfig(name='Seq2SQL', description='Seq2SQL-style structured field prediction retriever')
+                )
+        except ImportError as e:
+            print(f"Warning: Failed to register Seq2SQL retriever: {e}")
+
+        # 注册 IRNet 检索器
+        try:
+            from retrievers.irnet_retriever import IRNetRetriever
+            if 'IRNet' not in RetrieverFactory._registry:
+                RetrieverFactory.register(
+                    'IRNet', IRNetRetriever,
+                    RetrieverConfig(name='IRNet', description='IRNet-style IR-guided schema retrieval retriever')
+                )
+        except ImportError as e:
+            print(f"Warning: Failed to register IRNet retriever: {e}")
+
     except ImportError as e:
         print(f"Warning: Failed to auto-register retrievers: {e}")
 

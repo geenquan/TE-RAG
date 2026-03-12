@@ -20,6 +20,10 @@ from retrievers.llm_retriever import LLMRetriever
 from retrievers.terag_retriever import TERAGRetriever
 from retrievers.hybrid_retriever import HybridRetriever
 from retrievers.graph_retriever import GraphOnlyRetriever, GraphOnlyRetrieverAdapter
+from retrievers.resdsql_retriever import RESDSQLRetriever
+from retrievers.ratsql_retriever import RATSQLRetriever
+from retrievers.seq2sql_retriever import Seq2SQLRetriever
+from retrievers.irnet_retriever import IRNetRetriever
 from retrievers.retriever_factory import RetrieverFactory, RetrieverManager
 
 __all__ = [
@@ -34,6 +38,10 @@ __all__ = [
     'HybridRetriever',
     'GraphOnlyRetriever',
     'GraphOnlyRetrieverAdapter',
+    'RESDSQLRetriever',
+    'RATSQLRetriever',
+    'Seq2SQLRetriever',
+    'IRNetRetriever',
     'RetrieverFactory',
     'RetrieverManager'
 ]
