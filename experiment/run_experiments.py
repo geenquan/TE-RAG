@@ -329,11 +329,15 @@ def run_quick_ablation(field_csv: str, table_csv: str, output_dir: str,
 
 
 def main():
-    # 数据路径
-    field_csv = '/Users/apple/Documents/浙大工作/论文/分层查询数据表/code/source_dataset/processed_field_schema.csv'
-    table_csv = '/Users/apple/Documents/浙大工作/论文/分层查询数据表/code/source_dataset/processed_table_schema.csv'
-    qa_csv = '/Users/apple/Documents/浙大工作/论文/分层查询数据表/code/source_dataset/processed_qa_data.csv'
-    base_results_dir = '/Users/apple/Documents/浙大工作/论文/分层查询数据表/code/results'
+    # 从配置文件加载数据路径
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from terag.config import TERAGConfig
+    config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config.yaml')
+    config = TERAGConfig.from_yaml(config_path)
+    field_csv = config.data.field_csv
+    table_csv = config.data.table_csv
+    qa_csv = config.data.qa_csv
+    base_results_dir = config.output.results_dir
 
     # 生成时间戳目录
     output_dir = get_timestamp_dir(base_results_dir)

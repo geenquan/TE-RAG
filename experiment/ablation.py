@@ -916,14 +916,18 @@ class AblationExperiment:
 
 
 def main():
-    # 数据路径
-    field_csv = '/Users/apple/Documents/浙大工作/论文/分层查询数据表/code/source_dataset/processed_field_schema.csv'
-    table_csv = '/Users/apple/Documents/浙大工作/论文/分层查询数据表/code/source_dataset/processed_table_schema.csv'
-    qa_csv = '/Users/apple/Documents/浙大工作/论文/分层查询数据表/code/source_dataset/processed_qa_data.csv'
+    # 从配置文件加载数据路径
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from terag.config import TERAGConfig
+    config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config.yaml')
+    config = TERAGConfig.from_yaml(config_path)
+    field_csv = config.data.field_csv
+    table_csv = config.data.table_csv
+    qa_csv = config.data.qa_csv
 
     # 运行消融实验
     experiment = AblationExperiment(field_csv, table_csv, qa_csv)
-    results = experiment.run_all_experiments(output_dir='/Users/apple/Documents/浙大工作/论文/分层查询数据表/code/results')
+    results = experiment.run_all_experiments(output_dir=config.output.results_dir)
 
     # 打印结果
     print("\n" + "=" * 60)

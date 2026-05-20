@@ -492,7 +492,12 @@ class ExperimentVisualizer:
 
 def main():
     """生成示例可视化结果"""
-    output_dir = '/Users/apple/Documents/浙大工作/论文/分层查询数据表/code/results'
+    # 从配置文件加载输出路径
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from terag.config import TERAGConfig
+    config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config.yaml')
+    config = TERAGConfig.from_yaml(config_path)
+    output_dir = config.output.results_dir
     visualizer = ExperimentVisualizer(output_dir)
 
     # 模拟对比实验结果

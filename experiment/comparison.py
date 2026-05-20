@@ -406,11 +406,15 @@ def demo_add_custom_retriever():
 
 def main():
     """主函数"""
-    # 数据路径
-    field_csv = '/Users/apple/Documents/浙大工作/论文/分层查询数据表/code/source_dataset/processed_field_schema.csv'
-    table_csv = '/Users/apple/Documents/浙大工作/论文/分层查询数据表/code/source_dataset/processed_table_schema.csv'
-    qa_csv = '/Users/apple/Documents/浙大工作/论文/分层查询数据表/code/source_dataset/processed_qa_data.csv'
-    output_dir = '/Users/apple/Documents/浙大工作/论文/分层查询数据表/code/results/0303'
+    # 从配置文件加载数据路径
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from terag.config import TERAGConfig
+    config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config.yaml')
+    config = TERAGConfig.from_yaml(config_path)
+    field_csv = config.data.field_csv
+    table_csv = config.data.table_csv
+    qa_csv = config.data.qa_csv
+    output_dir = os.path.join(config.output.results_dir, '0303')
 
     # 创建实验
     experiment = ComparisonExperiment(field_csv, table_csv, qa_csv)

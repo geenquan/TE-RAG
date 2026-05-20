@@ -12,7 +12,7 @@
 
 ```bash
 # 进入项目目录
-cd /Users/apple/Documents/浙大工作/论文/分层查询数据表/code
+cd /path/to/code
 
 # 安装依赖包
 pip install pandas numpy networkx jieba matplotlib psutil
