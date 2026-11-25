@@ -1,0 +1,1 @@
+"""Current field confidence gate."""
