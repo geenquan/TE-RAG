@@ -7,13 +7,15 @@
 import os
 import json
 import re
-import jieba
 import pandas as pd
 from collections import defaultdict
 from typing import Dict, List, Set, Tuple, Optional
 from dataclasses import dataclass, field
 
 from terag.config import TERAGConfig
+from terag.tokenization import tokenize_text
+
+PATTERN_IMPLEMENTATION = 'deterministic_patterns_v1'
 
 
 @dataclass
@@ -73,35 +75,28 @@ class PatternMiner:
         """
         self.config = config
 
-        # 关键词配置
+        # 挖掘模式: keywords（中文业务词表）/ generic（英文，从历史 Query-SQL 自动学习）
+        self.mode = getattr(config.pattern_mining, 'mode', 'keywords')
+        self.language = getattr(config.tokenizer, 'language', 'chinese')
+
+        # 关键词配置（全部来自 config，不在代码中硬编码）
         self.entity_keywords = config.pattern_mining.entity_keywords
         self.attribute_keywords = config.pattern_mining.attribute_keywords
         self.similarity_threshold = config.pattern_mining.similarity_threshold
         self.min_pattern_count = config.pattern_mining.min_pattern_count
 
-        # 聚合关键词
-        self.aggregation_keywords = {
-            '多少': 'VALUE',
-            '哪些': 'LIST',
-            '总计': 'SUM',
-            '合计': 'SUM',
-            '平均': 'AVG',
-            '最大': 'MAX',
-            '最小': 'MIN',
-            '数量': 'COUNT',
-            '排名': 'RANK',
-        }
+        # 聚合关键词 / 时间模式（按模式选择中英文版本）
+        if self.mode == 'generic':
+            self.aggregation_keywords = dict(config.pattern_mining.english_aggregation_keywords)
+            self.time_patterns = [tuple(p) for p in config.pattern_mining.english_time_patterns
+                                  if isinstance(p, (list, tuple)) and len(p) == 2]
+        else:
+            self.aggregation_keywords = dict(config.pattern_mining.aggregation_keywords)
+            self.time_patterns = [tuple(p) for p in config.pattern_mining.time_patterns
+                                  if isinstance(p, (list, tuple)) and len(p) == 2]
 
-        # 时间模式
-        self.time_patterns = [
-            (r'\d{4}年\d{1,2}月', 'YEAR_MONTH'),
-            (r'\d{4}年', 'YEAR'),
-            (r'\d{1,2}月', 'MONTH'),
-            (r'今年', 'THIS_YEAR'),
-            (r'去年', 'LAST_YEAR'),
-            (r'上月', 'LAST_MONTH'),
-            (r'本季度', 'THIS_QUARTER'),
-        ]
+        # generic 模式：延迟加载 schema 词表（用于 query↔schema 签名 token 提取）
+        self._schema_vocab: Optional[Set[str]] = None
 
     def mine(self, element_to_queries: Dict[str, Set[str]]) -> Dict[str, List[Pattern]]:
         """
@@ -116,9 +111,9 @@ class PatternMiner:
         pattern_library = defaultdict(list)
 
         # 第一阶段：直接挖掘
-        for element_node, queries in element_to_queries.items():
-            patterns = self._mine_patterns_for_element(list(queries))
-            for pattern_key, pattern_data in patterns.items():
+        for element_node, queries in sorted(element_to_queries.items()):
+            patterns = self._mine_patterns_for_element(sorted(queries))
+            for pattern_key, pattern_data in sorted(patterns.items()):
                 if pattern_data['count'] >= self.min_pattern_count:
                     pattern = Pattern(
                         pattern_id=f"{element_node}_{len(pattern_library[element_node])}",
@@ -166,9 +161,44 @@ class PatternMiner:
 
         return dict(patterns)
 
+    def _load_schema_vocab(self) -> Set[str]:
+        """
+        加载 schema 词表（generic 模式）
+
+        从 table/field 名称与描述分词构建词表，用于识别历史查询中的 schema 相关
+        签名 token —— 使 TE-RAG 的 annotation learning 仍然来自 historical Query-SQL
+        与 schema 的关联，而不依赖固定业务词表。
+        """
+        if self._schema_vocab is not None:
+            return self._schema_vocab
+
+        vocab: Set[str] = set()
+        try:
+            field_csv = self.config.data.field_csv
+            table_csv = self.config.data.table_csv
+            if field_csv and os.path.exists(field_csv):
+                field_df = pd.read_csv(field_csv)
+                for _, row in field_df.iterrows():
+                    vocab.update(t for t in tokenize_text(str(row['field_name']), self.language) if len(t) > 1)
+                    vocab.update(t for t in tokenize_text(str(row.get('field_name_desc', '')), self.language) if len(t) > 1)
+            if table_csv and os.path.exists(table_csv):
+                table_df = pd.read_csv(table_csv)
+                for _, row in table_df.iterrows():
+                    vocab.update(t for t in tokenize_text(str(row['table']), self.language) if len(t) > 1)
+                    vocab.update(t for t in tokenize_text(str(row.get('table_desc', '')), self.language) if len(t) > 1)
+        except Exception as e:
+            print(f"  Warning: 加载 schema 词表失败: {e}")
+
+        self._schema_vocab = vocab
+        return vocab
+
     def _extract_entity_attr_pattern(self, query: str) -> Optional[str]:
         """提取实体-属性模式"""
-        words = list(jieba.cut(query))
+        if self.mode == 'generic':
+            return self._extract_signature_pattern(query)
+
+        # keywords 模式（中文业务词表，来自配置）
+        words = list(tokenize_text(query, self.language))
 
         entities = [w for w in words if any(k in w for k in self.entity_keywords)]
         attributes = [w for w in words if any(k in w for k in self.attribute_keywords)]
@@ -183,17 +213,37 @@ class PatternMiner:
 
         return None
 
+    def _extract_signature_pattern(self, query: str) -> Optional[str]:
+        """
+        提取 schema 签名模式（generic 模式）
+
+        历史查询中与 schema 词表相交的 content token 构成签名：
+        SIG:tok1|tok2|...
+        """
+        vocab = self._load_schema_vocab()
+        if not vocab:
+            return None
+
+        tokens = [t for t in tokenize_text(query, self.language) if len(t) > 1]
+        signature = sorted({t for t in tokens if t in vocab})
+
+        if not signature:
+            return None
+        return f"SIG:{'|'.join(signature[:8])}"
+
     def _extract_time_pattern(self, query: str) -> Optional[str]:
         """提取时间模式"""
+        text = query.lower() if self.mode == 'generic' else query
         for pattern, pattern_type in self.time_patterns:
-            if re.search(pattern, query):
+            if re.search(pattern, text):
                 return f"TIME:{pattern_type}"
         return None
 
     def _extract_aggregation_pattern(self, query: str) -> Optional[str]:
         """提取聚合模式"""
+        text = query.lower() if self.mode == 'generic' else query
         for keyword, agg_type in self.aggregation_keywords.items():
-            if keyword in query:
+            if keyword in text:
                 return f"AGG:{agg_type}"
         return None
 
@@ -203,7 +253,7 @@ class PatternMiner:
 
         对于模式较少的元素，从相似元素迁移模式
         """
-        element_list = list(pattern_library.keys())
+        element_list = sorted(pattern_library.keys())
 
         for i, e1 in enumerate(element_list):
             # 如果元素的模式数量较少

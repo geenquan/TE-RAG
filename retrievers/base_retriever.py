@@ -6,12 +6,20 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 import pandas as pd
 import numpy as np
 import time
 import tracemalloc
 import jieba
+
+from terag.tokenization import tokenize_english
+from datasets.gt_utils import (
+    parse_ground_truth_tables,
+    parse_ground_truth_fields,
+    has_structured_gold,
+    load_json_list,
+)
 
 
 @dataclass
@@ -195,132 +203,270 @@ class BaseRetriever(ABC):
             text: 输入文本
 
         Returns:
-            分词结果
+            分词结果（use_chinese_tokenizer=True 用 jieba，否则用英文正则分词）
         """
         if self.config.use_chinese_tokenizer:
             return list(jieba.cut(text))
         else:
-            return text.split()
+            return tokenize_english(text)
+
+    @staticmethod
+    def _retrieved_column_keys(results: List['RetrievalResult']) -> List[str]:
+        """
+        从检索结果提取 canonical 列 key（"table.column"，去掉 "C:" 前缀）
+
+        用于多表场景（BIRD）的 Column Recall / Precision / F1 计算
+        """
+        keys = []
+        for r in results:
+            for col, _ in r.columns:
+                col_name = col[2:] if col.startswith('C:') else col
+                if col_name not in keys:
+                    keys.append(col_name)
+        return keys
 
     def evaluate(self, test_data: pd.DataFrame, k: int = 5) -> EvaluationMetrics:
         """
         评估检索器性能
 
+        同时支持两种 ground truth 格式：
+        - PowerGrid（单表, table/field 列）：指标语义与原实现完全一致
+        - BIRD（多表, gold_tables/gold_fields 结构化列）：
+          * Table Accuracy = Table Exact Match（所有 gold 表都在检索结果中）
+          * Top-K Table Recall = mean(|gold ∩ topK| / |gold|)
+          * Column 指标基于 "table.column" 级别的集合匹配（macro average）
+          * SQL Accuracy = Schema-Grounded 准确率（表全中且 gold 列全覆盖）
+
         Args:
-            test_data: 测试数据，需包含question, table, field列
+            test_data: 测试数据，需包含question列，以及 table/field 或 gold_tables/gold_fields 列
             k: top-k结果
 
         Returns:
             评估指标
         """
-        table_correct = 0
-        sql_correct = 0
-        query_times = []
-        memory_usages = []
+        records = self.evaluate_detailed(test_data, k)
+        return self._aggregate_records(records)
 
-        # 新增指标统计
-        table_recall_sum = 0.0
-        column_recall_sum = 0.0
-        column_precision_sum = 0.0
-        column_f1_sum = 0.0
-        top1_recall_count = 0
-        top3_recall_count = 0
-        top5_recall_count = 0
+    def evaluate_detailed(self, test_data: pd.DataFrame, k: int = 5) -> List[Dict[str, Any]]:
+        """
+        逐条评估，返回每条查询的明细记录。
+
+        P1-A 起，每条记录同时包含：
+        - 新口径指标（eval/retrieval_metrics.py 定义）：hit_at_{1,3,5}（单表）或
+          table_recall_at_k / all_gold_covered（多表）、column_precision/recall/f1、
+          schema_coverage_success、gold_field_status；
+        - 兼容别名（旧字段名，语义 = P0 审计确认的旧实现语义，仅供旧管线内部使用）：
+          table_accuracy_hit / table_recall_full（单表 = Hit@k，k 为本参数）、
+          schema_sql_correct / sql_accuracy_hit（空 gold 字段记为正确的旧 SCS 变体）；
+        - 状态字段：status（ok/error）、error_type、error_message（检索异常不再中断
+          整个评估，也不会伪装成正常空预测）、exec_accuracy 恒为 'not_run'。
+
+        Args:
+            test_data: 测试数据
+            k: top-k结果
+
+        Returns:
+            记录列表，每条包含 question/db_id/difficulty/gold/retrieved 与各项指标
+        """
+        import time as _time
+        from eval.retrieval_metrics import (
+            evaluate_single_table_query, evaluate_multi_table_query,
+            normalize_column_key,
+        )
+
+        records = []
 
         for _, row in test_data.iterrows():
             query = row['question']
-            gt_table = row.get('table', '')
-            gt_fields = row.get('field', '')
 
-            # 处理真实标签
-            gt_table_simple = gt_table.split('.')[-1] if pd.notna(gt_table) else ''
+            record = {
+                'question': query,
+                'db_id': row.get('db_id', ''),
+                'difficulty': row.get('difficulty', ''),
+                'question_id': row.get('question_id', None),
+                'gold_tables': parse_ground_truth_tables(row),
+                'status': 'ok',
+                'error_type': None,
+                'error_message': None,
+            }
 
-            gt_field_list = []
-            if pd.notna(gt_fields) and isinstance(gt_fields, str):
-                gt_field_list = [f.strip() for f in gt_fields.split('|') if f.strip()]
+            # ---- 检索（逐题异常捕获：error 记录不中断评估、不伪装为正常结果） ----
+            t0 = _time.time()
+            try:
+                results, query_time, memory_mb = self.retrieve_with_metrics(query, k)
+            except Exception as e:  # noqa: BLE001 - 需记录任意检索异常
+                results, query_time, memory_mb = [], _time.time() - t0, 0.0
+                record.update({
+                    'status': 'error',
+                    'error_type': type(e).__name__,
+                    'error_message': str(e)[:500],
+                })
+                print(f"[evaluate_detailed] 检索异常 status=error: {type(e).__name__}: {str(e)[:200]}")
 
-            # 检索并记录性能
-            results, query_time, memory_mb = self.retrieve_with_metrics(query, k)
-
-            query_times.append(query_time)
-            memory_usages.append(memory_mb)
-
-            # 评估表格准确性
             retrieved_tables = [r.table for r in results]
+            retrieved_column_keys = []
+            retrieved_columns_detail = []
+            for r in results:
+                cols = [{'key': col, 'score': float(sc)} for col, sc in r.columns]
+                retrieved_columns_detail.append(
+                    {'table': r.table, 'table_score': float(r.table_score), 'columns': cols})
+                for col, _ in r.columns:
+                    key = normalize_column_key(col)
+                    if key:
+                        retrieved_column_keys.append(key)
 
-            # ========== 计算 Top-K Table Recall ==========
-            if gt_table_simple:
-                if gt_table_simple in retrieved_tables[:1]:
-                    top1_recall_count += 1
-                if gt_table_simple in retrieved_tables[:3]:
-                    top3_recall_count += 1
-                if gt_table_simple in retrieved_tables[:5]:
-                    top5_recall_count += 1
+            record.update({
+                'retrieved_tables': retrieved_tables,
+                'retrieved_column_keys': retrieved_column_keys,
+                'retrieved_columns_detail': retrieved_columns_detail,
+                'method_evidence': (results[0].metadata if results else None),
+                'query_time': query_time,
+                'memory_mb': memory_mb,
+                'exec_accuracy': 'not_run',
+            })
 
-                # Table Recall
-                if gt_table_simple in retrieved_tables:
-                    table_recall_sum += 1.0
+            if has_structured_gold(row):
+                # ========== BIRD 多表评估 ==========
+                gold_tables = record['gold_tables']
+                gold_columns = [f"{t}.{f}" for t, f in parse_ground_truth_fields(row) if t]
 
-            if gt_table_simple in retrieved_tables:
-                table_correct += 1
+                m = evaluate_multi_table_query(
+                    gold_tables, gold_columns, retrieved_tables, retrieved_column_keys)
 
-                # 评估字段准确性 - 收集所有返回的字段
-                retrieved_fields = []
-                for r in results:
-                    if r.table == gt_table_simple:
-                        for col, _ in r.columns:
-                            field_name = col.split('.')[-1]
-                            if field_name not in retrieved_fields:
-                                retrieved_fields.append(field_name)
+                # 兼容别名（旧语义：gold 为空记 0；SCS 空 gold 记为正确）
+                gold_set = set(gold_tables)
+                retrieved_set = set(retrieved_tables)
+                table_exact = gold_set.issubset(retrieved_set) if gold_set else False
+                gold_col_set = set(gold_columns)
+                pred_col_set = set(retrieved_column_keys)
+                inter = gold_col_set & pred_col_set
+                c_recall_legacy = len(inter) / len(gold_col_set) if gold_col_set else 0.0
+                schema_sql_correct_legacy = table_exact and (not gold_col_set or c_recall_legacy >= 1.0)
+                recall_at = m['table_recall_at_k']
 
-                # 如果有ground truth字段，检查是否都被检索到
-                if gt_field_list:
-                    # 检查是否所有必要字段都被检索到
-                    if all(f in retrieved_fields for f in gt_field_list):
-                        sql_correct += 1
+                record.update({
+                    'multi_table': len(gold_tables) > 1,
+                    'table_recall_at_k': recall_at,
+                    'all_gold_covered': m['all_gold_covered'],
+                    'column_precision': m['column_precision'],
+                    'column_recall': m['column_recall'],
+                    'column_f1': m['column_f1'],
+                    'annotated_field_coverage_success': m['annotated_field_coverage_success'],
+                    'schema_coverage_success': m['schema_coverage_success'],  # 兼容别名
+                    'gold_field_status': m['gold_field_status'],
+                    'gold_column_keys': m['gold_column_keys'],
+                    # ---- 兼容别名（旧字段/旧语义） ----
+                    'table_exact_match': table_exact,
+                    'table_accuracy_hit': table_exact,
+                    'table_recall_full': (len(gold_set & retrieved_set) / len(gold_set))
+                                        if gold_set else 0.0,
+                    'table_recall_at_1': recall_at.get(1) or 0.0,
+                    'table_recall_at_3': recall_at.get(3) or 0.0,
+                    'table_recall_at_5': recall_at.get(5) or 0.0,
+                    'schema_sql_correct': schema_sql_correct_legacy,
+                    'sql_accuracy_hit': schema_sql_correct_legacy,
+                })
+            else:
+                # ========== PowerGrid 单表评估 ==========
+                gt_table = row.get('table', '')
+                gt_fields = row.get('field', '')
 
-                    # ========== 计算 Column Recall / Precision / F1 ==========
-                    gt_set = set(gt_field_list)
-                    pred_set = set(retrieved_fields)
+                m = evaluate_single_table_query(
+                    gt_table if pd.notna(gt_table) else None,
+                    gt_fields if isinstance(gt_fields, str) else None,
+                    retrieved_tables, retrieved_column_keys)
 
-                    # 初始化变量
-                    c_recall = 0.0
-                    c_precision = 0.0
+                hit = m['hit']
 
-                    # Recall
-                    if gt_set:
-                        c_recall = len(gt_set & pred_set) / len(gt_set)
-                        column_recall_sum += c_recall
-
-                    # Precision
-                    if pred_set:
-                        c_precision = len(gt_set & pred_set) / len(pred_set)
-                        column_precision_sum += c_precision
-
-                    # F1
-                    if c_recall + c_precision > 0:
-                        c_f1 = 2 * c_recall * c_precision / (c_recall + c_precision)
-                        column_f1_sum += c_f1
+                # 兼容别名（旧语义：列指标仅统计命中表返回字段；空 gold 字段记 SCS 正确）
+                gt_table_simple = gt_table.split('.')[-1] if pd.notna(gt_table) else ''
+                table_hit_legacy = bool(gt_table_simple) and gt_table_simple in retrieved_tables
+                c_recall = c_precision = c_f1 = 0.0
+                sql_hit = False
+                if table_hit_legacy:
+                    retrieved_fields = []
+                    for r in results:
+                        if r.table == gt_table_simple:
+                            for col, _ in r.columns:
+                                field_name = col.split('.')[-1]
+                                if field_name not in retrieved_fields:
+                                    retrieved_fields.append(field_name)
+                    gt_field_list = m['gold_column_keys'] and [k.split('.')[-1] for k in m['gold_column_keys']]
+                    if gt_field_list:
+                        sql_hit = all(f.lower() in {x.lower() for x in retrieved_fields}
+                                      for f in gt_field_list)
+                        gt_set = {f.lower() for f in gt_field_list}
+                        pred_set = {x.lower() for x in retrieved_fields}
+                        inter_l = gt_set & pred_set
+                        c_recall = len(inter_l) / len(gt_set) if gt_set else 0.0
+                        c_precision = len(inter_l) / len(pred_set) if pred_set else 0.0
+                        c_f1 = (2 * c_recall * c_precision / (c_recall + c_precision)) \
+                            if (c_recall + c_precision) > 0 else 0.0
+                    else:
+                        sql_hit = True
                 else:
-                    # 如果没有指定字段，只要表正确就算SQL正确
-                    sql_correct += 1
+                    sql_hit = False
 
-        total = len(test_data)
+                record.update({
+                    'multi_table': False,
+                    'hit_at_1': bool(hit.get(1)),
+                    'hit_at_3': bool(hit.get(3)),
+                    'hit_at_5': bool(hit.get(5)),
+                    'column_precision': m['column_precision'],
+                    'column_recall': m['column_recall'],
+                    'column_f1': m['column_f1'],
+                    'annotated_field_coverage_success': m['annotated_field_coverage_success'],
+                    'schema_coverage_success': m['schema_coverage_success'],  # 兼容别名
+                    'gold_field_status': m['gold_field_status'],
+                    'gold_column_keys': m['gold_column_keys'],
+                    # ---- 兼容别名（旧字段/旧语义） ----
+                    'table_exact_match': table_hit_legacy,
+                    'table_accuracy_hit': table_hit_legacy,
+                    'table_recall_full': 1.0 if table_hit_legacy else 0.0,
+                    'table_recall_at_1': 1.0 if hit.get(1) else 0.0,
+                    'table_recall_at_3': 1.0 if hit.get(3) else 0.0,
+                    'table_recall_at_5': 1.0 if hit.get(5) else 0.0,
+                    'column_recall_legacy': c_recall,
+                    'column_precision_legacy': c_precision,
+                    'column_f1_legacy': c_f1,
+                    'schema_sql_correct': sql_hit,
+                    'sql_accuracy_hit': sql_hit,
+                })
+
+            records.append(record)
+
+        return records
+
+    @staticmethod
+    def _aggregate_records(records: List[Dict[str, Any]]) -> EvaluationMetrics:
+        """把逐条评估记录聚合为 EvaluationMetrics
+
+        兼容说明（P1-A）：正式报表改用 eval/retrieval_metrics.aggregate_records；
+        本方法仅供旧管线（--legacy、BIRD runner 兼容字段）使用。PowerGrid
+        记录的 column_* 字段已是新口径（全并集键级），旧口径保存在
+        column_*_legacy 字段中，此处优先取旧口径以维持旧入口行为不变。
+        """
+        total = len(records)
+        if total == 0:
+            return EvaluationMetrics(total_queries=0)
+
+        def mean(key: str, legacy_key: str = None) -> float:
+            src = legacy_key if (legacy_key and legacy_key in records[0]) else key
+            return float(np.mean([r.get(src, 0.0) for r in records])) if records else 0.0
 
         return EvaluationMetrics(
-            table_accuracy=table_correct / total if total > 0 else 0,
-            sql_accuracy=sql_correct / total if total > 0 else 0,
-            avg_query_time=np.mean(query_times) if query_times else 0,
-            avg_memory_mb=np.mean(memory_usages) if memory_usages else 0,
+            table_accuracy=mean('table_exact_match'),
+            sql_accuracy=mean('schema_sql_correct'),
+            avg_query_time=mean('query_time'),
+            avg_memory_mb=mean('memory_mb'),
             total_queries=total,
-            # 新增指标
-            table_recall=table_recall_sum / total if total > 0 else 0,
-            column_recall=column_recall_sum / total if total > 0 else 0,
-            column_precision=column_precision_sum / total if total > 0 else 0,
-            column_f1=column_f1_sum / total if total > 0 else 0,
-            top1_table_recall=top1_recall_count / total if total > 0 else 0,
-            top3_table_recall=top3_recall_count / total if total > 0 else 0,
-            top5_table_recall=top5_recall_count / total if total > 0 else 0,
+            table_recall=mean('table_recall_full'),
+            column_recall=mean('column_recall', 'column_recall_legacy'),
+            column_precision=mean('column_precision', 'column_precision_legacy'),
+            column_f1=mean('column_f1', 'column_f1_legacy'),
+            top1_table_recall=mean('table_recall_at_1'),
+            top3_table_recall=mean('table_recall_at_3'),
+            top5_table_recall=mean('table_recall_at_5'),
         )
 
     @property

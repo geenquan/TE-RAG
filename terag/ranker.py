@@ -72,8 +72,8 @@ class TableRanker:
                 score += weight * feature_value
             scores[table_node] = score
 
-        # 排序并返回 top-k
-        sorted_results = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        # 排序并返回 top-k（并列分数按表名稳定排序，不依赖插入顺序）
+        sorted_results = sorted(scores.items(), key=lambda x: (-x[1], x[0]))
         return sorted_results[:k]
 
     def save(self, output_path: str):
@@ -145,8 +145,8 @@ class FieldRanker:
                 score += weight * feature_value
             scores[field_name] = score
 
-        # 排序并返回 top-k
-        sorted_results = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        # 排序并返回 top-k（并列分数按字段名稳定排序，不依赖插入顺序）
+        sorted_results = sorted(scores.items(), key=lambda x: (-x[1], x[0]))
         return sorted_results[:k]
 
     def save(self, output_path: str):
@@ -198,7 +198,8 @@ class CombinedRanker:
         feature_extractor: FeatureExtractor,
         query: str,
         k_tables: int = 5,
-        k_fields: int = 10
+        k_fields: int = 10,
+        diagnostics: Optional[Dict] = None
     ) -> List[RankingResult]:
         """
         执行完整排序
@@ -218,6 +219,13 @@ class CombinedRanker:
         table_features = feature_extractor.extract_table_features(query)
         top_tables = self.table_ranker.rank(table_features, k=k_tables)
 
+        if diagnostics is not None:
+            diagnostics.update({
+                'candidate_scope': 'tables in extract_table_features; fields of returned tables only',
+                'table_budget': k_tables, 'column_budget_per_table': k_fields,
+                'tables': _feature_trace(table_features, self.table_ranker.weights),
+                'returned_tables': [t for t, _ in top_tables], 'fields': {}})
+
         # 2. 对每个表提取字段级特征并排序
         for table_node, table_score in top_tables:
             table_name = table_node.replace('T:', '')
@@ -227,6 +235,11 @@ class CombinedRanker:
 
             # 字段排序
             top_fields = self.field_ranker.rank(field_features, k=k_fields)
+
+            if diagnostics is not None:
+                diagnostics['fields'][table_name] = {
+                    'candidates': _feature_trace(field_features, self.field_ranker.weights),
+                    'returned_columns': [f for f, _ in top_fields]}
 
             # 构建结果
             results.append(RankingResult(
@@ -246,3 +259,13 @@ class CombinedRanker:
         """加载排序器"""
         self.table_ranker.load(os.path.join(artifacts_dir, 'table_ranker.pkl'))
         self.field_ranker.load(os.path.join(artifacts_dir, 'field_ranker.pkl'))
+
+
+def _feature_trace(features, weights):
+    """Capture already-computed inputs; do not recompute features or rankings."""
+    return {key: {'features': dict(values),
+                  'weighted_components': {name: value * weights.get(name, 0.0)
+                                          for name, value in values.items()},
+                  'score': sum(value * weights.get(name, 0.0)
+                               for name, value in values.items())}
+            for key, values in features.items()}

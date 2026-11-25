@@ -1,19 +1,14 @@
-# TE-RAG 论文版依赖
+# Verified Python 3.11.5 environment; no network models are required.
+numpy==1.26.4
+pandas==2.0.2
+scipy==1.17.1
+sqlglot==30.30.0
+networkx==3.1
+jieba==0.42.1
+scikit-learn==1.3.0
+PyYAML==6.0.1
+matplotlib==3.7.2
 
-# 基础
+# Existing legacy utilities (not used to execute SQL by the ablation launcher).
 psutil
-pandas
-matplotlib
-numpy
-
-# 新增依赖
-sqlglot>=20.0.0
 duckdb>=0.9.0
-pyyaml>=6.0
-scikit-learn>=1.0.0
-
-# 中文分词
-jieba
-
-# 图计算
-networkx

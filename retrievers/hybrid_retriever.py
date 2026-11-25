@@ -48,9 +48,14 @@ class HybridRetriever(BaseRetriever):
         # 融合权重
         self.alpha = alpha
 
-        # 创建子检索器
-        self.bm25_retriever = BM25Retriever(field_csv, table_csv)
-        self.vector_retriever = VectorRetriever(field_csv, table_csv)
+        # 创建子检索器（透传分词语言配置，BIRD 英文场景不使用 jieba）
+        sub_tokenizer = self.config.use_chinese_tokenizer
+        self.bm25_retriever = BM25Retriever(
+            field_csv, table_csv,
+            config=RetrieverConfig(name="BM25", use_chinese_tokenizer=sub_tokenizer))
+        self.vector_retriever = VectorRetriever(
+            field_csv, table_csv,
+            config=RetrieverConfig(name="Vector", use_chinese_tokenizer=sub_tokenizer))
 
     def fit(self, train_data: pd.DataFrame = None):
         """
@@ -131,7 +136,7 @@ class HybridRetriever(BaseRetriever):
             final_scores[table] = self.alpha * bm25_s + (1 - self.alpha) * vector_s
 
         # 按融合分数排序
-        sorted_tables = sorted(final_scores.items(), key=lambda x: x[1], reverse=True)[:k]
+        sorted_tables = sorted(final_scores.items(), key=lambda x: (-x[1], x[0]))[:k]
 
         # 构建结果
         results = []
@@ -183,4 +188,4 @@ class HybridRetriever(BaseRetriever):
             column_scores.append((f"C:{table_name}.{field_name}", col_score))
 
         column_scores.sort(key=lambda x: x[1], reverse=True)
-        return column_scores[:8]
+        return column_scores[:10]  # P1-B 协议统一列预算

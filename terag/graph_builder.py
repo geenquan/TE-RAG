@@ -14,6 +14,7 @@ from typing import Dict, List, Set, Tuple, Optional
 
 from terag.config import TERAGConfig
 from terag.sql_role_parser import SQLRoleParser, ParseResult
+from datasets.gt_utils import parse_ground_truth_tables, parse_ground_truth_fields
 
 
 class BipartiteGraphBuilder:
@@ -46,11 +47,21 @@ class BipartiteGraphBuilder:
             config: TE-RAG 配置
         """
         self.config = config
-        self.parser = SQLRoleParser(default_role_weights=config.graph.role_weights)
+        self.parser = SQLRoleParser(
+            default_role_weights=config.graph.role_weights,
+            dialect=config.sql_dialect,
+            mode=getattr(config.graph, 'parse_mode', 'ast'),
+        )
 
         # 加载表和字段数据
         self.field_df = pd.read_csv(config.data.field_csv)
         self.table_df = pd.read_csv(config.data.table_csv)
+
+        # 简单表名 -> 物理 schema 列集合（SQL 解析消歧用，兼容多表/别名 SQL）
+        self.schema_columns: Dict[str, Set[str]] = defaultdict(set)
+        for _, row in self.field_df.iterrows():
+            simple = str(row['table']).split('.')[-1]
+            self.schema_columns[simple.lower()].add(str(row['field_name']))
 
         # 角色统计
         self.role_stats = defaultdict(lambda: defaultdict(int))
@@ -83,7 +94,7 @@ class BipartiteGraphBuilder:
 
         # 添加列节点
         for _, row in self.field_df.iterrows():
-            col_node = f"C:{row['table']}.{row['field_name']}"
+            col_node = f"C:{row['table']}.{str(row['field_name']).lower()}"
             graph.add_node(
                 col_node,
                 bipartite=1,
@@ -94,48 +105,64 @@ class BipartiteGraphBuilder:
         # 添加边
         use_role_parser = self.config.ablation.use_role_parser
 
-        for idx, row in train_data.iterrows():
-            query_node = f"Q_{idx}"
-            table = row.get('table', '')
-            fields = row.get('field', '')
+        for pos in range(len(train_data)):
+            row = train_data.iloc[pos]
+            query_node = f"Q_{pos}"
             sql = row.get('sql', '')
 
-            # 解析 SQL 角色
+            # 统一解析 ground truth（PowerGrid 单表 legacy / BIRD 多表结构化 gold 列）
+            gold_tables = parse_ground_truth_tables(row)          # canonical 表 id
+            gold_fields = parse_ground_truth_fields(row)          # [(canonical 表 id, 字段名)]
+            simple_to_canonical = {t.split('.')[-1].lower(): t for t in gold_tables}
+
+            # 解析 SQL 角色（多表场景不传 expected_table，依赖别名/schema 消歧）
             if use_role_parser and pd.notna(sql):
-                parse_result = self.parser.parse(str(sql), table.split('.')[-1] if pd.notna(table) else None)
+                expected = gold_tables[0].split('.')[-1] if len(gold_tables) == 1 else None
+                parse_result = self.parser.parse(
+                    str(sql), expected, schema_columns=dict(self.schema_columns))
             else:
                 parse_result = None
 
             # 添加列边
-            if pd.notna(fields) and isinstance(fields, str):
-                for field in fields.split('|'):
-                    field = field.strip()
-                    if field:
-                        table_simple = table.split('.')[-1] if pd.notna(table) else ''
-                        col_node = f"C:{table_simple}.{field}"
+            for table_id, field in gold_fields:
+                col_node = f"C:{table_id}.{str(field).lower()}"
 
-                        if graph.has_node(col_node):
-                            # 计算权重
-                            if parse_result and parse_result.success:
-                                weight = parse_result.get_field_weight(
-                                    table_simple, field,
-                                    self.config.graph.role_weights
-                                )
-                                # 记录角色统计
-                                if table_simple in parse_result.field_roles:
-                                    if field.lower() in parse_result.field_roles[table_simple]:
-                                        for role in parse_result.field_roles[table_simple][field.lower()].roles:
-                                            self.role_stats[table_simple][role] += 1
-                            else:
-                                # 回退到字符串匹配
-                                weight = self._get_weight_by_string_match(str(sql) if pd.notna(sql) else '')
+                if graph.has_node(col_node):
+                    # 计算权重
+                    if parse_result and parse_result.success:
+                        table_simple = table_id.split('.')[-1].lower()
+                        weight = parse_result.get_field_weight(
+                            table_simple, field,
+                            self.config.graph.role_weights
+                        )
+                        # One physical column can have several SQL case spellings.
+                        # Merge their role evidence by maximum, never by summation.
+                        for spelling, role_info in parse_result.field_roles.get(table_simple, {}).items():
+                            if str(spelling).lower() == str(field).lower():
+                                weight = max([weight] + [self.config.graph.role_weights.get(role, 1.0) for role in role_info.roles])
+                        # 消融：角色权重统一（保留 AST 解析和边集，仅权重→1.0）
+                        if hasattr(self.config.ablation, 'use_role_weight') \
+                                and not self.config.ablation.use_role_weight:
+                            weight = 1.0
+                        # 记录角色统计
+                        info = parse_result.find_field_info(table_simple, field)
+                        if info is not None:
+                            for role in info.roles:
+                                self.role_stats[table_id][role] += 1
+                    else:
+                        # 回退到字符串匹配
+                        weight = self._get_weight_by_string_match(str(sql) if pd.notna(sql) else '')
+                        # 消融：角色权重统一（回退路径同样不恢复非统一权重）
+                        if hasattr(self.config.ablation, 'use_role_weight') \
+                                and not self.config.ablation.use_role_weight:
+                            weight = 1.0
 
-                            graph.add_edge(query_node, col_node, weight=weight)
+                    previous = graph.get_edge_data(query_node, col_node, default={}).get('weight', 0.0)
+                    graph.add_edge(query_node, col_node, weight=max(previous, weight))
 
-            # 添加表边
-            if pd.notna(table):
-                table_simple = table.split('.')[-1]
-                table_node = f"T:{table_simple}"
+            # 添加表边（多表查询为每张 gold 表都建立边）
+            for table_id in gold_tables:
+                table_node = f"T:{table_id}"
                 if graph.has_node(table_node):
                     table_weight = self.config.graph.role_weights.get('FROM', 1.0)
                     graph.add_edge(query_node, table_node, weight=table_weight)
@@ -192,8 +219,9 @@ class BipartiteGraphBuilder:
         """
         element_to_queries = defaultdict(set)
 
-        for idx, row in train_data.iterrows():
-            query_node = f"Q_{idx}"
+        for pos in range(len(train_data)):
+            row = train_data.iloc[pos]
+            query_node = f"Q_{pos}"
             question = row['question']
 
             # 获取所有邻居节点

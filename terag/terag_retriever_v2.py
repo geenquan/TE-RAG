@@ -79,8 +79,17 @@ class TERAGRetrieverV2:
         self.field_df = pd.read_csv(config.data.field_csv)
         self.table_df = pd.read_csv(config.data.table_csv)
 
+        # 记录实际加载的外部资产来源（P1-A：默认 fit 不加载任何旧资产）
+        self.asset_sources: List[str] = []
+
         # 状态
         self._is_fitted = False
+
+        # P2-D3：B/C 注解通道产物（fit 后可用；默认 None=关闭）
+        self.miner = None
+        self.transfer_result = None
+        self._annotation_terms = {}
+        self._diagnostics = None
 
     @classmethod
     def from_artifacts(cls, config: TERAGConfig, artifacts_dir: str = None) -> 'TERAGRetrieverV2':
@@ -103,6 +112,7 @@ class TERAGRetrieverV2:
         if os.path.exists(graph_path):
             with open(graph_path, 'rb') as f:
                 retriever.graph = pickle.load(f)
+            retriever.asset_sources.append(graph_path)
             print(f"加载图: {graph_path}")
 
         # 加载模式
@@ -110,6 +120,7 @@ class TERAGRetrieverV2:
         if os.path.exists(patterns_path):
             miner = PatternMiner(config)
             retriever.patterns = miner.load(patterns_path)
+            retriever.asset_sources.append(patterns_path)
             print(f"加载模式: {patterns_path}")
 
         # 加载索引
@@ -117,6 +128,7 @@ class TERAGRetrieverV2:
         if os.path.exists(index_dir):
             builder = IndexBuilder(config)
             retriever.index = builder.load(index_dir)
+            retriever.asset_sources.append(index_dir)
             print(f"加载索引: {index_dir}")
 
         # 加载排序器
@@ -126,10 +138,12 @@ class TERAGRetrieverV2:
         table_ranker_path = os.path.join(artifacts_dir, 'table_ranker.pkl')
         if os.path.exists(table_ranker_path):
             table_ranker.load(table_ranker_path)
+            retriever.asset_sources.append(table_ranker_path)
 
         field_ranker_path = os.path.join(artifacts_dir, 'field_ranker.pkl')
         if os.path.exists(field_ranker_path):
             field_ranker.load(field_ranker_path)
+            retriever.asset_sources.append(field_ranker_path)
 
         retriever.ranker = CombinedRanker(config, table_ranker, field_ranker)
 
@@ -141,6 +155,7 @@ class TERAGRetrieverV2:
                 for line in f:
                     train_data.append(json.loads(line))
             retriever.train_data = pd.DataFrame(train_data)
+            retriever.asset_sources.append(train_path)
 
         # 创建特征提取器
         if retriever.graph and retriever.index:
@@ -157,16 +172,41 @@ class TERAGRetrieverV2:
                 retriever.table_df
             )
 
+        # P1-A：关键资产缺失时不得宣告训练成功
+        if retriever.graph is None or retriever.index is None:
+            raise ValueError(
+                f"from_artifacts: {artifacts_dir} 缺少 graph.pkl 或 bm25_index/，"
+                f"无法构成可检索实例（拒絶静默降级）")
+
         retriever._is_fitted = True
         return retriever
 
-    def fit(self, train_data: pd.DataFrame):
+    def fit(self, train_data: pd.DataFrame, load_artifact_weights: bool = False,
+            diagnostics=None):
         """
         训练检索器
 
+        仅使用传入的 train_data 与当前 config 中的固定参数，从零构建
+        图/模式/索引/特征。默认不加载 artifacts/ 中任何历史产物
+        （P1-A 泄漏修复：旧实现会隐式加载 table_ranker.pkl / field_ranker.pkl，
+        这些权重可能来自包含本次测试集的历史划分）。
+
+        P2-D3：B/C 注解通道接入主线（config.annotations）——
+        use_history=True 时同一次 fit 内：训练日志 → 直接注解 B →（可选）
+        受约束迁移 C → IndexBuilder（extra_table_texts 内存传递）→
+        特征提取器（列排序注解加成）。开关支持消融；B/C 生成一次、去重注入；
+        不读取评价 SQL/gold、不加载全局历史资产。
+
         Args:
-            train_data: 训练数据
+            train_data: 训练数据（当前运行允许使用的全部监督信号）
+            diagnostics: 默认 None；显式 DiagnosticExport 仅导出本次新计算证据
+            load_artifact_weights: 显式选择加载 artifacts 中的排序器权重，
+                仅用于复现历史行为；启用时会记录资产来源
         """
+        from terag.config import AnnotationsConfig
+        self._diagnostics = diagnostics
+        ann_cfg = getattr(self.config, 'annotations',
+                          AnnotationsConfig())  # 缺省关闭（兼容旧行为）
         self.train_data = train_data
 
         # 1. 构建图
@@ -174,16 +214,70 @@ class TERAGRetrieverV2:
         graph_builder = BipartiteGraphBuilder(self.config)
         self.graph = graph_builder.build(train_data)
 
-        # 2. 挖掘模式
+        # 2. 挖掘模式（旧关键词管线——与 B/C 注解并行存在，不互相注入；
+        #    其 _generalize_patterns 不参与新迁移路径）
         print("挖掘查询模式...")
         element_to_queries = graph_builder.get_element_to_queries(self.graph, train_data)
         pattern_miner = PatternMiner(self.config)
         self.patterns = pattern_miner.mine(element_to_queries)
 
-        # 3. 构建索引
+        # 2b. B/C 注解（P2-D3 主线接线：一次生成、内存传递）
+        self.miner = None
+        self.transfer_result = None
+        extra_texts = None
+        texts_b, texts_c = {}, {}
+        self._annotation_terms = {}   # {table.column: [term, ...]} 列排序加成
+        if ann_cfg.use_history:
+            from retrievers.annotation_miner import DirectAnnotationMiner
+            print("挖掘直接注解 (B)...")
+            self.miner = DirectAnnotationMiner(self.field_df, self.table_df,
+                                               dialect='mysql').mine(train_data)
+            texts_b = self.miner.table_annotation_texts(
+                self.config.index.field_weights.pattern)
+            # B 类列加成项
+            for a in self.miner.annotations:
+                if a['type'] == 'TERM' and a.get('status') == 'confirmed' \
+                        and a.get('target'):
+                    self._annotation_terms.setdefault(a['target'], []).append(
+                        str(a['content']))
+            extra_texts = dict(texts_b)
+            if ann_cfg.use_transfer:
+                from retrievers.annotation_transfer import (
+                    SchemaInfo, transfer_annotations, transfer_index_texts,
+                    transfer_column_bonus_map)
+                print("受约束迁移注解 (C)...")
+                columns = {}
+                for t, g in self.field_df.groupby('table'):
+                    columns[t] = (g[['field_name', 'field_name_desc',
+                                    'field_type']]
+                                  .rename(columns={'field_name_desc': 'field_desc'})
+                                  .to_dict('records'))
+                table_desc = {r['table']: r.get('table_desc', '')
+                              for _, r in self.table_df.iterrows()}
+                self.transfer_result = transfer_annotations(
+                    self.miner.annotations,
+                    SchemaInfo(columns=columns, table_desc=table_desc))
+                texts_c = transfer_index_texts(
+                    self.transfer_result, self.config.index.field_weights.pattern)
+                for t, items in texts_c.items():
+                    merged = list(extra_texts.get(t, []))
+                    existing = {txt for txt, _w in merged}
+                    for txt, w in items:
+                        if txt not in existing:   # B/C 同文本去重
+                            merged.append((txt, w))
+                            existing.add(txt)
+                    extra_texts[t] = merged
+                for key, terms in transfer_column_bonus_map(
+                        self.transfer_result).items():
+                    lst = self._annotation_terms.setdefault(key, [])
+                    for term in terms:
+                        if term not in lst:
+                            lst.append(term)
+
+        # 3. 构建索引（B/C 经 extra_table_texts 内存注入）
         print("构建索引...")
         index_builder = IndexBuilder(self.config)
-        self.index = index_builder.build()
+        self.index = index_builder.build(extra_table_texts=extra_texts)
 
         # 4. 创建特征提取器
         self.feature_extractor = FeatureExtractor(
@@ -195,24 +289,31 @@ class TERAGRetrieverV2:
             self.field_df,
             self.table_df
         )
+        # 列排序注解加成接口（P2-D3）：特征提取器可查询 B/C 术语命中
+        self.feature_extractor.annotation_terms = dict(self._annotation_terms)
 
-        # 5. 创建排序器（使用默认权重或加载学习到的权重）
+        # 5. 创建排序器（默认使用 config.feature 中声明的固定权重）
         self.ranker = CombinedRanker(self.config)
 
-        # 尝试加载学习到的权重
-        table_ranker_path = self.config.get_artifact_path('table_ranker.pkl')
-        field_ranker_path = self.config.get_artifact_path('field_ranker.pkl')
+        # 显式 opt-in 才加载 artifacts 中的历史权重（P1-A 泄漏修复）
+        if load_artifact_weights:
+            table_ranker_path = self.config.get_artifact_path('table_ranker.pkl')
+            field_ranker_path = self.config.get_artifact_path('field_ranker.pkl')
 
-        if os.path.exists(table_ranker_path):
-            self.ranker.table_ranker.load(table_ranker_path)
+            if os.path.exists(table_ranker_path):
+                self.ranker.table_ranker.load(table_ranker_path)
+                self.asset_sources.append(table_ranker_path)
 
-        if os.path.exists(field_ranker_path):
-            self.ranker.field_ranker.load(field_ranker_path)
+            if os.path.exists(field_ranker_path):
+                self.ranker.field_ranker.load(field_ranker_path)
+                self.asset_sources.append(field_ranker_path)
 
+        if self._diagnostics is not None:
+            self._diagnostics.record_fit(self, train_data, texts_b, texts_c, extra_texts)
         self._is_fitted = True
-        print("TE-RAG V2 训练完成")
+        print(f"TE-RAG V2 训练完成（排序权重来源: {'artifacts(显式加载)' if load_artifact_weights else 'config 固定默认值'}）")
 
-    def retrieve(self, query: str, k: int = 5) -> List[RetrievalResultV2]:
+    def retrieve(self, query: str, k: int = 5, *, diagnostic_qid=None) -> List[RetrievalResultV2]:
         """
         检索
 
@@ -226,13 +327,13 @@ class TERAGRetrieverV2:
         if not self._is_fitted:
             raise RuntimeError("Retriever has not been fitted. Call fit() first.")
 
-        # 执行排序
-        ranking_results = self.ranker.rank(
-            self.feature_extractor,
-            query,
-            k_tables=k,
-            k_fields=10
-        )
+        if diagnostic_qid is not None and self._diagnostics is None:
+            raise ValueError('diagnostic_qid requires explicit diagnostics in fit')
+        trace = {} if diagnostic_qid is not None else None
+        rank_kwargs = {'k_tables': k, 'k_fields': 10}
+        if trace is not None:
+            rank_kwargs['diagnostics'] = trace
+        ranking_results = self.ranker.rank(self.feature_extractor, query, **rank_kwargs)
 
         # 转换为 RetrievalResultV2
         results = []
@@ -244,6 +345,8 @@ class TERAGRetrieverV2:
                 metadata={'method': 'TE-RAG-V2'}
             ))
 
+        if trace is not None:
+            self._diagnostics.record_query(diagnostic_qid, trace)
         return results
 
     def retrieve_with_ablation(

@@ -1,320 +1,83 @@
-# TE-RAG 实验框架
+# TE-RAG
 
-**表格增强检索增强生成（Table-Enhanced Retrieval-Augmented Generation）**
+历史 Query–SQL 驱动的表/字段 Schema Grounding。当前代码直接在本目录迭代。
 
-用于自然语言查询转换为SQL的表格检索和字段选择任务。
+统一实验入口是 `run_experiment.py`，电网和 BIRD 共用根目录的 `terag/`、`retrievers/`、`datasets/`、`eval/`。数据集专用评分与运行接线在 `experiments/enterprise/`、`experiments/bird/`。当前参数在 `configs/enterprise.json`、`configs/bird.json`。
 
----
+本地论文：`TE-RAG_DASFAA/writing_round5_20261123/main.tex` / `main.pdf`，含附录版本同目录。`main` 分支只分发当前核心源码、参数、测试和使用说明；论文工作稿、私有实验输入、逐题结果、归档和本机环境不随代码提交。
 
-## 一键运行指南
+代码仓库不包含企业数据、训练折接受 B/C、索引、BIRD 派生输入或核对预测。新 clone 可以安装依赖并运行组件回归；精确复现论文数值需额外恢复授权输入，见 [PRIVATE_INPUTS.md](PRIVATE_INPUTS.md)。
 
-### 第一步：安装依赖
+## 新环境安装
 
-```bash
-# 进入项目目录
-cd /path/to/code
+使用 Python 3.11，在项目根目录执行：
 
-# 安装依赖包
-pip install pandas numpy networkx jieba matplotlib psutil
+```sh
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m unittest discover -s tests -v
+python run_experiment.py enterprise --list
 ```
 
-### 第二步：运行实验
+恢复授权输入后才使用 `--check` 和正式运行命令。新环境使用正常 Python 启动，不加 `-S`；下方 `-S` 示例针对原本机保留的 `.runtime/` 数值环境。
 
-```bash
-# 运行所有实验（对比实验 + 冷启动实验 + 消融实验 + 可视化）
-python experiment/run_experiments.py
+## 运行
+
+本机使用 IDE 配置的 Python 3.11.5。`.runtime/site-packages/` 保留已经验证的数值依赖，`-S` 避开 SDK 全局环境的 NumPy ABI 冲突。不需要旧实验目录。
+
+```sh
+PY=/Users/apple/miniconda3/envs/low-code-gpt/bin/python
+
+# 只读检查输入身份和当前模块导入
+"$PY" -S run_experiment.py enterprise --check
+"$PY" -S run_experiment.py bird --check
+
+# 查看各轨道的方法；enterprise 的 90 份接受参数直接保存在 configs 中
+"$PY" -S run_experiment.py enterprise --list
+"$PY" -S run_experiment.py bird --track independent --list
+
+# 电网：原两协议五折，固定消融；独立优化消融改为 --track independent
+PYTHONHASHSEED=0 "$PY" -S run_experiment.py enterprise --track fixed --output results/enterprise_fixed
+
+# BIRD：原两协议五折，当前各协议选中的 Full
+PYTHONHASHSEED=0 "$PY" -S run_experiment.py bird --output results/bird_selected
+
+# BIRD 完整固定/独立优化消融：使用 --track fixed / --track independent
+# 原 core 配置与其消融：使用 --track core；参数默认值不冒充优化版 Full
+
+# 小规模运行并核对保存预测；--limit 的输出明确标为 smoke
+PYTHONHASHSEED=0 "$PY" -S run_experiment.py bird --protocol question --fold 0 --db california_schools --limit 3 --verify --output results/bird_smoke
+
+# 六个常用离线基线；两个数据集均支持相同的 --methods 名称
+PYTHONHASHSEED=0 "$PY" -S run_experiment.py bird --protocol question --fold 0 --db california_schools --methods BM25 MetadataMatched ExampleRRF TFIDF Hybrid CooccurRRF --output results/bird_baselines
+
+# 组件、物理字段匹配、门控执行和输出边界回归
+PYTHONHASHSEED=0 PYTHONPATH="$PWD:$PWD/.runtime/site-packages" "$PY" -S -m unittest discover -s tests -v
 ```
 
-### 第三步：查看结果
-
-```bash
-# 查看实验结果目录
-ls results/
-
-# 查看对比实验结果
-cat results/comparison_results.csv
-
-# 查看消融实验结果
-cat results/ablation_results.csv
-
-# 查看冷启动实验结果
-cat results/cold_start_results.csv
-
-# 查看总结报告
-cat results/experiment_summary.md
-```
-
----
-
-## 命令详解
-
-### 命令1：运行全部实验
-
-```bash
-python experiment/run_experiments.py
-```
-
-**执行内容：**
-1. **对比实验** - 比较 BM25、Vector、LLM、TE-RAG 四种方法的性能
-2. **冷启动实验** - 测试在新表上的检索效果
-3. **消融实验** - 分析TE-RAG各组件的贡献
-4. **可视化** - 生成图表和报告
-
-**输出文件：**
-| 文件名 | 内容 |
-|-------|------|
-| `comparison_results.csv` | 对比实验结果 |
-| `cold_start_results.csv` | 冷启动实验结果 |
-| `ablation_results.csv` | 消融实验结果 |
-| `comparison_accuracy.png` | 准确性对比图 |
-| `cold_start_comparison.png` | 冷启动对比图 |
-| `ablation_results.png` | 消融实验图 |
-| `experiment_summary.md` | 总结报告 |
-| `comparison_table.tex` | LaTeX表格 |
-
-### 命令2：只运行对比实验
-
-```bash
-python experiment/comparison.py
-```
-
-### 命令3：只运行消融实验
-
-```bash
-python experiment/ablation.py
-```
-
-### 命令4：只生成可视化图表
-
-```bash
-python experiment/visualize.py
-```
-
-### 命令5：预处理数据（可选）
-
-如果需要重新处理原始数据：
-
-```bash
-cd source_dataset
-python process_dataset_new.py
-```
-
-**输入：** `dataset.py` 中的 DDL 和 QA 数据
-**输出：**
-- `processed_field_schema.csv` - 字段结构
-- `processed_table_schema.csv` - 表结构
-- `processed_qa_data.csv` - QA数据
-
----
-
-## 项目结构
-
-```
-code/
-├── experiment/                    # 实验模块
-│   ├── run_experiments.py        # ⭐ 主入口：一键运行所有实验
-│   ├── comparison.py             # 对比实验
-│   ├── ablation.py               # 消融实验
-│   └── visualize.py              # 可视化工具
-│
-├── retrievers/                    # 检索器模块
-│   ├── __init__.py               # 模块入口
-│   ├── base_retriever.py         # 基类
-│   ├── bm25_retriever.py         # BM25检索器
-│   ├── vector_retriever.py       # 向量检索器
-│   ├── llm_retriever.py          # LLM检索器
-│   ├── terag_retriever.py        # TE-RAG检索器（核心）
-│   └── retriever_factory.py      # 工厂类
-│
-├── source_dataset/               # 数据集
-│   ├── processed_field_schema.csv   # 字段结构
-│   ├── processed_table_schema.csv   # 表结构
-│   ├── processed_qa_data.csv        # QA数据
-│   └── process_dataset_new.py       # 数据预处理脚本
-│
-├── results/                      # 实验结果（自动生成）
-│   ├── *.csv                     # 结果数据
-│   ├── *.png                     # 图表
-│   └── *.md                      # 报告
-│
-├── base/                         # 旧版代码（兼容保留）
-├── client/                       # LLM客户端
-├── utils/                        # 工具函数
-├── main.py                       # 旧入口
-└── requirements.txt              # 依赖列表
-```
-
----
-
-## 实验说明
-
-### 1. 对比实验
-
-比较四种检索方法的性能：
-
-| 方法 | 说明 |
-|-----|------|
-| **BM25** | 基于关键词的传统检索 |
-| **Vector** | 基于TF-IDF向量的检索 |
-| **LLM** | 基于大语言模型的检索 |
-| **TE-RAG** | 本方法：表格增强RAG |
-
-**评估指标：**
-- Table Accuracy：表格选择准确率
-- SQL Accuracy：SQL生成准确率（表+字段都正确）
-- Query Time：查询时间
-- Memory：内存占用
-
-### 2. 消融实验
-
-分析TE-RAG各组件的贡献：
-
-| 配置 | 说明 |
-|-----|------|
-| Full TE-RAG | 完整方法 |
-| w/o Graph Weight | 去掉二分图加权 |
-| w/o Template Mining | 去掉模板挖掘 |
-| w/o Pattern Generalization | 去掉模式泛化 |
-| w/o Business Rules | 去掉业务规则 |
-| w/o Enhanced Index | 去掉增强索引 |
-
-### 3. 冷启动实验
-
-测试系统对新表的适应能力：
-- 训练时排除某些表
-- 测试时只使用这些新表
-
----
-
-## 数据格式
-
-### QA数据 (processed_qa_data.csv)
-
-| 列名 | 说明 | 示例 |
-|-----|------|------|
-| question | 自然语言问题 | "2025年2月杭州公司的售电量是多少？" |
-| table | 目标表名 | "db.table_name" |
-| field | 目标字段 | "field1\|field2" |
-| sql | 参考SQL | "SELECT field1 FROM table..." |
-
-### 表结构 (processed_table_schema.csv)
-
-| 列名 | 说明 |
-|-----|------|
-| table | 表名 |
-| db | 数据库名 |
-| table_desc | 表描述 |
-| field | 所有字段（\|分隔） |
-| schema | DDL语句 |
-
-### 字段结构 (processed_field_schema.csv)
-
-| 列名 | 说明 |
-|-----|------|
-| table | 所属表 |
-| db | 数据库 |
-| field_name | 字段名 |
-| field_name_desc | 字段描述 |
-| field_type | 字段类型 |
-
----
-
-## 常见问题
-
-### Q1: 如何修改训练/测试比例？
-
-编辑 `experiment/run_experiments.py`，修改：
-```python
-n_train = int(len(indices) * 0.8)  # 改为80%训练，20%测试
-```
-
-### Q2: 如何只测试特定方法？
-
-编辑 `experiment/run_experiments.py`，修改：
-```python
-methods = ['BM25', 'TE-RAG']  # 只测试这两个
-```
-
-### Q3: 如何添加新的检索方法？
-
-1. 在 `retrievers/` 创建新文件 `my_retriever.py`
-2. 继承 `BaseRetriever` 类
-3. 实现 `fit()` 和 `_retrieve()` 方法
-4. 在 `retrievers/__init__.py` 中导入
-
-详见 `retrievers/README.md`
-
-### Q4: 运行报错怎么办？
-
-1. 检查依赖是否安装完整
-2. 检查数据文件是否存在
-3. 检查Python版本（建议3.8+）
-
-```bash
-# 重新安装依赖
-pip install -r requirements.txt
-```
-
----
-
-## 快速测试代码
-
-```python
-# 测试单个检索器
-from retrievers import RetrieverFactory
-import pandas as pd
-
-# 数据路径
-field_csv = 'source_dataset/processed_field_schema.csv'
-table_csv = 'source_dataset/processed_table_schema.csv'
-qa_csv = 'source_dataset/processed_qa_data.csv'
-
-# 创建TE-RAG检索器
-retriever = RetrieverFactory.create('TE-RAG', field_csv, table_csv)
-
-# 读取数据并训练
-qa_df = pd.read_csv(qa_csv)
-train_data = qa_df.iloc[:100]  # 使用前100条训练
-retriever.fit(train_data)
-
-# 测试检索
-query = "2025年2月杭州公司的售电量是多少？"
-results = retriever.retrieve(query, k=5)
-
-# 打印结果
-for r in results:
-    print(f"表: {r.table}, 得分: {r.table_score:.3f}")
-    for col, score in r.columns[:3]:
-        print(f"  - {col}: {score:.3f}")
-
-# 评估
-test_data = qa_df.iloc[100:150]  # 使用50条测试
-metrics = retriever.evaluate(test_data, k=5)
-print(f"Table Accuracy: {metrics.table_accuracy:.1%}")
-print(f"SQL Accuracy: {metrics.sql_accuracy:.1%}")
-```
-
----
-
-## 依赖版本
-
-```
-pandas>=1.0.0
-numpy>=1.18.0
-networkx>=2.5
-jieba>=0.42
-matplotlib>=3.0.0
-psutil>=5.0.0
-```
-
----
-
-## 联系方式
-
-如有问题，请提交Issue或联系项目维护者。
-
----
-
-## 许可证
-
-MIT License
+输出目录必须是 `results/` 下尚不存在的子目录。输出包含压缩逐题预测和 `summary.json`，不会覆盖旧结果。`--fold`、`--protocol`、`--methods` 可以缩小执行范围；`--limit` 仅供检查运行。
+
+Dense 需要本机已有 MiniLM 缓存及 torch/transformers。三个 API 基线名称为 `DenseDeepSeek`、`KaSLA-Adapted`、`LinkAlign-SingleDB-Adapted`，只在 question 协议显式请求，并增加 `--allow-api`。它们需要额外模型/API 依赖及运行时凭据；整理工作未调用 API。BIRD API 仍使用原预算 broker，默认上限 CNY 20，配置在 `experiments/bird/api/config.py`；模型/API 可用性不属于本次验证范围。
+
+## 保留内容
+
+| 路径 | 用途 |
+|---|---|
+| `run_experiment.py` | 当前实验唯一命令行入口 |
+| `terag/`、`retrievers/`、`datasets/`、`eval/` | 共用核心和论文基线 |
+| `experiments/` | 当前电网评分、BIRD 适配/门控、基线接线 |
+| `configs/` | 当前实际接受参数，可直接编辑迭代 |
+| `source_dataset/` | 原始企业数据和完整 Gold，原路径保留 |
+| `data/` | 当前协议、BIRD Schema/训练行/Gold、必要 B/C 与索引、压缩核对预测 |
+| `.runtime/` | 本机已经验证的数值依赖 |
+| `results/` | 今后新实验输出 |
+| `tests/` | 当前组件与入口回归 |
+| `TE-RAG_DASFAA/writing_round5_20261123/` | 最新自包含论文源文件及 PDF |
+| `_archive/20261124_cleanup/` | 移出的旧代码、旧实验、报告和论文版本 |
+
+`data/` 是运行输入和核对资料，不能当作旧实验缓存删除。电网 C 仍消费接受的训练折资产，保留原来源和预算校验；不会因为目录整理重新生成或重新选参。源码与参数不绑定旧 release 哈希，未来直接修改当前文件即可。输入身份由 `data/INPUT_MANIFEST.json` 管理；有意改变数据时需同步更新该清单并记录实验变化。
+
+`--verify` 对比表顺序和字段顺序：电网覆盖当前 Full/消融；BIRD 另覆盖保存的基线输出。它不表示重新核验全部历史统计。电网基线单独运行，不使用 `--verify`。
+
+归档目录不参与当前实验导入或数据读取，可以整体移到项目外保存。归档内历史入口及其绝对路径不再维护。移动到同一硬盘的归档目录不会释放整个项目的磁盘空间。

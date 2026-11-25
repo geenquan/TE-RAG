@@ -13,6 +13,7 @@ __pycache__/
 # Virtual Environment
 # ============================================
 venv/
+.venv/
 ENV/
 env/
 .env
@@ -54,3 +55,27 @@ results/
 # Jupyter Notebook
 # ============================================
 .ipynb_checkpoints/
+
+
+# Local final-ablation freeze: preserve restricted assets outside the index.
+/.local_freeze/
+/research_runs/
+/config.yaml
+/TE-RAG_DASFAA/expansion_formal_dds_run/api_evidence.jsonl
+/TE-RAG_DASFAA/expansion_formal_dds_run/predictions_dds.jsonl
+/TE-RAG_DASFAA/expansion_formal_dds_run/dds_candidate_analysis.json
+/TE-RAG_DASFAA/reviewer_baselines_validation/kasla_scorer_fold*.json
+
+# Current working tree and consolidated private archive (2026-11-24).
+/_archive/
+/.runtime/
+/data/
+/.cleanup_staging_*/
+
+# Local manuscripts and working notes are outside the source-only main tree.
+/TE-RAG_DASFAA/
+/AGENTS.md
+/CLAUDE.md
+/PROJECT_GUIDE.md
+/SESSION_HANDOFF.md
+/.venv/

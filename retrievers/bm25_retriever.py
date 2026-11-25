@@ -123,8 +123,8 @@ class BM25Retriever(BaseRetriever):
                     scores[doc_idx] = 0
                 scores[doc_idx] += score
 
-        # 排序获取top-k
-        sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:k]
+        # 排序获取top-k（并列分数按 doc_idx 稳定排序）
+        sorted_scores = sorted(scores.items(), key=lambda x: (-x[1], x[0]))[:k]
 
         results = []
         for doc_idx, score in sorted_scores:
@@ -153,9 +153,9 @@ class BM25Retriever(BaseRetriever):
 
                 column_scores.append((f"C:{table_name}.{field_name}", col_score))
 
-            # 按得分排序，取前8个字段
+            # 每表列预算：最多10个去重有效字段（P1-B 协议统一）
             column_scores.sort(key=lambda x: x[1], reverse=True)
-            column_list = column_scores[:8]
+            column_list = column_scores[:10]
 
             results.append(RetrievalResult(
                 table=table_name,

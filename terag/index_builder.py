@@ -8,13 +8,17 @@ import os
 import json
 import pickle
 import math
-import jieba
 import pandas as pd
 import numpy as np
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional, Set
 
 from terag.config import TERAGConfig
+from terag.tokenization import tokenize_text
+
+INDEX_IMPLEMENTATION = 'index_doc_uniqueness_v1'
+
+from typing import Dict, List, Optional, Tuple
 
 
 class IndexBuilder:
@@ -45,6 +49,9 @@ class IndexBuilder:
         self.k1 = config.index.bm25.k1
         self.b = config.index.bm25.b
 
+        # 分词语言（PowerGrid=chinese / BIRD=english）
+        self.language = getattr(config.tokenizer, 'language', 'chinese')
+
         # 字段权重
         self.field_weights = config.index.field_weights
 
@@ -63,9 +70,14 @@ class IndexBuilder:
         self.pattern_library = miner.load(pattern_path)
         print(f"加载模式库: {len(self.pattern_library)} 个元素")
 
-    def build(self) -> Dict:
+    def build(self, extra_table_texts: Optional[Dict[str, List[Tuple[str, float]]]] = None) -> Dict:
         """
         构建索引
+
+        Args:
+            extra_table_texts: P2-D1 内存注解通道——{table: [(text, weight), ...]}，
+                当前训练折提取的直接注解（B 类）注入对应表文档；不经全局文件，
+                不依赖 artifacts 中的历史模式库。缺省=None（纯元数据/模式库行为不变）。
 
         Returns:
             索引字典，包含：
@@ -82,7 +94,13 @@ class IndexBuilder:
         # 是否使用增强索引
         use_enhanced = self.config.ablation.use_enhanced_index
 
+        # A document ID has one authoritative metadata record. Match the former
+        # final document/norm (last row), preserving first-seen document order,
+        # without appending the same document twice to term postings.
+        table_rows = {}
         for _, row in self.table_df.iterrows():
+            table_rows[row['table']] = row
+        for row in table_rows.values():
             table_name = row['table']
             table_node = f"T:{table_name}"
             table_desc = row.get('table_desc', '')
@@ -104,13 +122,22 @@ class IndexBuilder:
                     document_parts.append((col_row['field_name'], self.field_weights.field_name))
 
                     field_desc = col_row.get('field_name_desc', '')
-                    if pd.notna(field_desc):
+                    include_desc = getattr(self.config.index, 'include_field_desc', True)
+                    if pd.notna(field_desc) and include_desc:
                         document_parts.append((field_desc, self.field_weights.field_desc))
 
-                # 添加模式
+                # 添加模式（文件加载的模式库——离线路径，正式实验不使用）
                 if self.pattern_library and table_node in self.pattern_library:
                     for pattern in self.pattern_library[table_node]:
                         document_parts.append((pattern.pattern_text, self.field_weights.pattern))
+
+                # P2-D1：当前训练折直接注解（内存传递）
+                # 消融开关：use_annotation_index=False 时 B/C 文本不入索引
+                ann_cfg = getattr(self.config, 'annotations', None)
+                ann_index_on = getattr(ann_cfg, 'use_annotation_index', True) if ann_cfg else True
+                if ann_index_on:
+                    for text, w in (extra_table_texts or {}).get(table_name, []):
+                        document_parts.append((text, w))
             else:
                 # 基础索引：等权重
                 document_parts.append((table_name, 1.0))
@@ -139,6 +166,7 @@ class IndexBuilder:
             'N': N,
             'k1': self.k1,
             'b': self.b,
+            'language': self.language,
         }
 
     def _index_document(
@@ -163,7 +191,7 @@ class IndexBuilder:
         document_text_parts = []
 
         for text, weight in document_parts:
-            words = list(jieba.cut(str(text)))
+            words = tokenize_text(str(text), self.language)
             document_text_parts.append(str(text))
 
             for word in words:
@@ -204,6 +232,7 @@ class IndexBuilder:
             'N': index['N'],
             'k1': index['k1'],
             'b': index['b'],
+            'language': index.get('language', 'chinese'),
         }
         with open(os.path.join(output_dir, 'metadata.json'), 'w', encoding='utf-8') as f:
             json.dump(metadata, f, ensure_ascii=False, indent=2)
@@ -237,6 +266,7 @@ class IndexBuilder:
             'N': metadata['N'],
             'k1': metadata['k1'],
             'b': metadata['b'],
+            'language': metadata.get('language', 'chinese'),
         }
 
 
@@ -260,6 +290,8 @@ class BM25Retriever:
         self.N = index['N']
         self.k1 = index['k1']
         self.b = index['b']
+        # 分词语言随索引持久化（PowerGrid=chinese / BIRD=english）
+        self.language = index.get('language', 'chinese')
 
     def search(self, query: str, k: int = 5) -> List[Tuple[str, float]]:
         """
@@ -272,7 +304,7 @@ class BM25Retriever:
         Returns:
             [(doc_id, score), ...]
         """
-        query_terms = [t for t in jieba.cut(query) if len(t) > 1]
+        query_terms = [t for t in tokenize_text(query, self.language) if len(t) > 1]
         scores = defaultdict(float)
 
         for term in query_terms:
