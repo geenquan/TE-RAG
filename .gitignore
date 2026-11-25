@@ -72,6 +72,10 @@ results/
 /data/
 /.cleanup_staging_*/
 
-# Local manuscripts stay outside Git; project guidance is versioned with code.
+# Local manuscripts and working notes are outside the source-only main tree.
 /TE-RAG_DASFAA/
+/AGENTS.md
+/CLAUDE.md
+/PROJECT_GUIDE.md
+/SESSION_HANDOFF.md
 /.venv/
